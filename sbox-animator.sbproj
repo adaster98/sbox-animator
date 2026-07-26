@@ -1,0 +1,21 @@
+{
+  "Title": "S&box Weapon Animator",
+  "Type": "library",
+  "Org": "asterw",
+  "Ident": "sbox-animator",
+  "Schema": 1,
+  "IncludeSourceFiles": true,
+  "HasAssets": false,
+  "Resources": null,
+  "PackageReferences": [],
+  "EditorReferences": null,
+  "Mounts": null,
+  "IsStandaloneOnly": false,
+  "Metadata": {
+    "Compiler": {
+      "RootNamespace": "SboxWeaponAnimator",
+      "GenerateDocumentation": true,
+      "SuppressWarnings": ""
+    }
+  }
+}

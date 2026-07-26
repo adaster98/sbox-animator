@@ -1,0 +1,277 @@
+#nullable enable annotations
+
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text;
+
+namespace SboxWeaponAnimator.Editor;
+
+public static class ModelDocWriter
+{
+	public const string Header =
+		"<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} " +
+		"format:modeldoc29:version{3cec427c-1b0e-4d48-a90a-0436f33a6041} -->";
+
+	public static string WriteHost(
+		string referenceSmd,
+		IEnumerable<(WeaponAnimationClip Clip, string Source)> clips,
+		string animGraphPath,
+		IEnumerable<string> preservedBones )
+	{
+		var animationNodes = new StringBuilder();
+		foreach ( var item in clips.OrderBy( x => x.Clip.Name ) )
+		{
+			animationNodes.AppendLine( $$"""
+								{
+									_class = "AnimFile"
+									name = "{{WeaponAnimationNames.SequenceName( item.Clip )}}"
+									activity_name = ""
+									activity_weight = 1
+									weight_list_name = ""
+									fade_in_time = 0.1
+									fade_out_time = 0.1
+									looping = {{item.Clip.Loop.ToString().ToLowerInvariant()}}
+									delta = false
+									worldSpace = false
+									hidden = false
+									anim_markup_ordered = false
+									disable_compression = false
+									disable_interpolation = false
+									enable_scale = true
+									source_filename = "{{item.Source}}"
+									start_frame = -1
+									end_frame = -1
+									framerate = {{F( item.Clip.SampleRate )}}
+									take = 0
+									reverse = false
+								},
+				""" );
+		}
+
+		var boneMarkupNodes = new StringBuilder();
+		foreach ( var boneName in preservedBones
+			.Where( name => !string.IsNullOrWhiteSpace( name ) )
+			.Distinct( System.StringComparer.OrdinalIgnoreCase )
+			.OrderBy( name => name, System.StringComparer.OrdinalIgnoreCase ) )
+		{
+			boneMarkupNodes.AppendLine( $$"""
+										{
+											_class = "BoneMarkup"
+											target_bone = "{{Escape( boneName )}}"
+											ignore_Translation = false
+											ignore_rotation = false
+											do_not_discard = true
+										},
+				""" );
+		}
+
+		return $$"""
+			{{Header}}
+			// SboxWeaponAnimator generated file. Ownership is recorded in weaponanim.manifest.json.
+			{
+				rootNode =
+				{
+					_class = "RootNode"
+					children =
+					[
+						{
+							_class = "MaterialGroupList"
+							children =
+							[
+								{
+									_class = "DefaultMaterialGroup"
+									remaps = [ ]
+									use_global_default = true
+									global_default_material = "materials/tools/toolsinvisible.vmat"
+								},
+							]
+						},
+						{
+							_class = "RenderMeshList"
+							children =
+							[
+								{
+									_class = "RenderMeshFile"
+									name = "animation_host"
+									filename = "{{referenceSmd}}"
+									import_translation = [ 0.0, 0.0, 0.0 ]
+									import_rotation = [ 0.0, 0.0, 0.0 ]
+									import_scale = 1.0
+									align_origin_x_type = "None"
+									align_origin_y_type = "None"
+									align_origin_z_type = "None"
+									parent_bone = ""
+									import_filter = { exclude_by_default = false exception_list = [ ] }
+								},
+							]
+						},
+						{
+							_class = "AnimationList"
+							children =
+							[
+			{{animationNodes}}				]
+							default_root_bone_name = ""
+						},
+						{
+							_class = "BoneMarkupList"
+							children =
+							[
+			{{boneMarkupNodes}}				]
+							bone_cull_type = "None"
+						},
+					]
+					model_archetype = ""
+					primary_associated_entity = ""
+					anim_graph_name = "{{animGraphPath}}"
+					base_model_name = ""
+				}
+			}
+			""";
+	}
+
+	public static string WriteSourceWrapper(
+		string sourcePath,
+		string sourceRootBoneName = "",
+		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots = null )
+	{
+		var modifierList = BuildSourceModifierList(
+			sourceRootBoneName,
+			excludedBranchRoots );
+
+		return $$"""
+			{{Header}}
+			// SboxWeaponAnimator generated source wrapper.
+			{
+			rootNode =
+			{
+				_class = "RootNode"
+				children =
+				[
+					{
+						_class = "MaterialGroupList"
+						children =
+						[
+							{
+								_class = "DefaultMaterialGroup"
+								remaps = [ ]
+								use_global_default = true
+								global_default_material = "materials/default.vmat"
+							},
+						]
+					},
+					{
+						_class = "RenderMeshList"
+						children =
+						[
+							{
+								_class = "RenderMeshFile"
+								name = "source_weapon"
+								filename = "{{sourcePath}}"
+								import_translation = [ 0.0, 0.0, 0.0 ]
+								import_rotation = [ 0.0, 0.0, 0.0 ]
+								import_scale = 1.0
+								align_origin_x_type = "None"
+								align_origin_y_type = "None"
+								align_origin_z_type = "None"
+								parent_bone = ""
+								import_filter = { exclude_by_default = false exception_list = [ ] }
+							},
+						]
+						},
+						{ _class = "BoneMarkupList" bone_cull_type = "None" },
+			{{modifierList}}			
+					]
+					model_archetype = ""
+				primary_associated_entity = ""
+				anim_graph_name = ""
+				base_model_name = ""
+				}
+			}
+			""";
+	}
+
+	public static string WriteVmdlSourceAdapter(
+		string sourceModelDoc,
+		string sourceRootBoneName,
+		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots = null )
+	{
+		var modifierList = BuildSourceModifierList(
+			sourceRootBoneName,
+			excludedBranchRoots );
+		if ( string.IsNullOrWhiteSpace( modifierList ) )
+			return sourceModelDoc;
+
+		var rootIndex = sourceModelDoc.IndexOf( "rootNode", System.StringComparison.Ordinal );
+		var childrenIndex = rootIndex < 0
+			? -1
+			: sourceModelDoc.IndexOf( "children", rootIndex, System.StringComparison.Ordinal );
+		var openingBracket = childrenIndex < 0
+			? -1
+			: sourceModelDoc.IndexOf( '[', childrenIndex );
+		if ( openingBracket < 0 )
+			throw new System.InvalidOperationException( "The source VMDL does not expose a writable root child list." );
+
+		var insertion = "\n" + modifierList.Trim() + "\n";
+		return sourceModelDoc.Insert( openingBracket + 1, insertion );
+	}
+
+	private static string BuildSourceModifierList(
+		string sourceRootBoneName,
+		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots )
+	{
+		var modifiers = new System.Collections.Generic.List<string>();
+		if ( !string.IsNullOrWhiteSpace( sourceRootBoneName )
+			&& !sourceRootBoneName.Equals( "weapon_root", System.StringComparison.OrdinalIgnoreCase ) )
+		{
+			modifiers.Add( $$"""
+									{
+										_class = "RenameBone"
+										original_bone_name = "{{Escape( sourceRootBoneName )}}"
+										new_bone_name = "weapon_root"
+									},
+				""" );
+		}
+
+		var excluded = excludedBranchRoots?
+			.Where( x => !string.IsNullOrWhiteSpace( x ) )
+			.Distinct( System.StringComparer.OrdinalIgnoreCase )
+			.OrderBy( x => x, System.StringComparer.OrdinalIgnoreCase )
+			.ToArray() ?? [];
+		if ( excluded.Length > 0 )
+		{
+			var boneNames = string.Join(
+				"\n",
+				excluded.Select( x => $"\t\t\t\t\t\t\t\t\t\"{Escape( x )}\"," ) );
+			modifiers.Add( $$"""
+									{
+										_class = "RemoveBoneAndChildren"
+										bone_names =
+										[
+										{{boneNames}}
+										]
+									},
+				""" );
+		}
+
+		var modifierList = modifiers.Count == 0
+				? ""
+				: $$"""
+							{
+								_class = "ModelModifierList"
+								children =
+								[
+								{{string.Join( "\n", modifiers )}}
+								]
+							},
+
+						""";
+		return modifierList;
+	}
+
+	private static string F( float value ) =>
+		value.ToString( "0.######", CultureInfo.InvariantCulture );
+
+	private static string Escape( string value ) =>
+		value.Replace( "\\", "\\\\" ).Replace( "\"", "\\\"" );
+}
