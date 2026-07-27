@@ -12,11 +12,17 @@ namespace SboxWeaponAnimator.Editor;
 public sealed class ClipRackPanel : Widget
 {
 	private readonly WeaponAnimatorController _controller;
+	private readonly ScrollArea _clipScroll;
 	private readonly Widget _clipCanvas;
+	private readonly ScrollArea? _propertiesScroll;
 	private readonly Widget? _rigCanvas;
 	private readonly Widget? _propertiesCanvas;
 	private readonly Label _actionHint;
 	private readonly bool _clipsOnly;
+	private readonly Dictionary<Guid, WeaponAnimatorButton> _clipButtons = [];
+	private readonly Dictionary<Guid, int> _propertyScrollByClip = [];
+	private string _clipListSignature = "";
+	private Guid _lastSelectedClipId;
 
 	public event Action<string, ValidationSeverity>? StatusChanged;
 
@@ -37,16 +43,16 @@ public sealed class ClipRackPanel : Widget
 
 		if ( showClipHeader )
 			Layout.Add( Header( "CLIP RACK", this ) );
-		var clipScroll = new ScrollArea( this )
+		_clipScroll = new ScrollArea( this )
 		{
 			MinimumSize = new Vector2( 200, clipsOnly ? 70 : 160 )
 		};
-		_clipCanvas = new Widget( clipScroll );
+		_clipCanvas = new Widget( _clipScroll );
 		_clipCanvas.Layout = Layout.Column();
 		_clipCanvas.Layout.Margin = WeaponAnimatorTheme.ScrollCanvasMargin();
 		_clipCanvas.Layout.Spacing = 2;
-		clipScroll.Canvas = _clipCanvas;
-		Layout.Add( clipScroll, 2 );
+		_clipScroll.Canvas = _clipCanvas;
+		Layout.Add( _clipScroll, 2 );
 
 		var actions = RigAuditPanel.Row( this );
 		actions.Layout.Add( WeaponAnimatorTheme.Button(
@@ -84,13 +90,13 @@ public sealed class ClipRackPanel : Widget
 		}
 		else
 		{
-			var propertiesScroll = new ScrollArea( this ) { MinimumHeight = 80 };
-			_propertiesCanvas = new Widget( propertiesScroll );
+			_propertiesScroll = new ScrollArea( this ) { MinimumHeight = 80 };
+			_propertiesCanvas = new Widget( _propertiesScroll );
 			_propertiesCanvas.Layout = Layout.Column();
 			_propertiesCanvas.Layout.Margin = WeaponAnimatorTheme.ScrollCanvasMargin();
 			_propertiesCanvas.Layout.Spacing = 4;
-			propertiesScroll.Canvas = _propertiesCanvas;
-			Layout.Add( propertiesScroll, 1 );
+			_propertiesScroll.Canvas = _propertiesCanvas;
+			Layout.Add( _propertiesScroll, 1 );
 		}
 
 		var addCustom = WeaponAnimatorTheme.Button(
@@ -101,7 +107,8 @@ public sealed class ClipRackPanel : Widget
 		Layout.Add( addCustom );
 
 		_controller.DocumentChanged += Rebuild;
-		_controller.SelectionChanged += Rebuild;
+		if ( !_clipsOnly )
+			_controller.SelectionChanged += Rebuild;
 		Rebuild();
 	}
 
@@ -170,39 +177,55 @@ public sealed class ClipRackPanel : Widget
 
 	private void Rebuild()
 	{
-		_clipCanvas?.Layout.Clear( true );
+		var clipScroll = _clipScroll.VerticalScrollbar.Value;
+		var selectedClipId = _controller.Document.Workspace.SelectedClipId;
+		var propertiesScroll = CapturePropertiesScroll( selectedClipId );
+		var clipSignature = ClipListSignature();
+		if ( _clipListSignature != clipSignature || _clipButtons.Count == 0 )
+		{
+			_clipCanvas.Layout.Clear( true );
+			_clipButtons.Clear();
+
+			AddClipGroup( "CORE", [
+				WeaponClipRole.Idle, WeaponClipRole.Deploy, WeaponClipRole.Fire,
+				WeaponClipRole.FireDry, WeaponClipRole.Reload, WeaponClipRole.ReloadEmpty,
+				WeaponClipRole.Holster
+			] );
+			AddClipGroup( "PRESENTATION", [
+				WeaponClipRole.Inspect, WeaponClipRole.Sprint, WeaponClipRole.Jump,
+				WeaponClipRole.Lower, WeaponClipRole.Ironsights
+			] );
+			AddClipGroup( "INTERACTION", [
+				WeaponClipRole.GrabStance, WeaponClipRole.GrabGestureOne,
+				WeaponClipRole.GrabGestureTwo, WeaponClipRole.GrabGestureThree,
+				WeaponClipRole.GrabGestureFour
+			] );
+			AddClipGroup( "INCREMENTAL", [
+				WeaponClipRole.ReloadEnter, WeaponClipRole.FirstShell,
+				WeaponClipRole.InsertShell, WeaponClipRole.ReloadExit
+			] );
+
+			var custom = _controller.Document.Clips
+				.Where( x => x.Role == WeaponClipRole.Custom )
+				.ToArray();
+			if ( custom.Length > 0 )
+			{
+				_clipCanvas.Layout.Add( Header( "CUSTOM", _clipCanvas ) );
+				foreach ( var clip in custom )
+					AddClipButton( clip );
+			}
+			_clipCanvas.Layout.AddStretchCell();
+			_clipListSignature = ClipListSignature();
+			_clipCanvas.UpdateGeometry();
+			_clipScroll.VerticalScrollbar.Value = clipScroll;
+		}
+		else
+		{
+			RefreshClipButtons();
+		}
+
 		_rigCanvas?.Layout.Clear( true );
 		_propertiesCanvas?.Layout.Clear( true );
-		if ( _clipCanvas is null )
-			return;
-
-		AddClipGroup( "CORE", [
-			WeaponClipRole.Idle, WeaponClipRole.Deploy, WeaponClipRole.Fire,
-			WeaponClipRole.FireDry, WeaponClipRole.Reload, WeaponClipRole.ReloadEmpty,
-			WeaponClipRole.Holster
-		] );
-		AddClipGroup( "PRESENTATION", [
-			WeaponClipRole.Inspect, WeaponClipRole.Sprint, WeaponClipRole.Jump,
-			WeaponClipRole.Lower, WeaponClipRole.Ironsights
-		] );
-		AddClipGroup( "INTERACTION", [
-			WeaponClipRole.GrabStance, WeaponClipRole.GrabGestureOne,
-			WeaponClipRole.GrabGestureTwo, WeaponClipRole.GrabGestureThree,
-			WeaponClipRole.GrabGestureFour
-		] );
-		AddClipGroup( "INCREMENTAL", [
-			WeaponClipRole.ReloadEnter, WeaponClipRole.FirstShell,
-			WeaponClipRole.InsertShell, WeaponClipRole.ReloadExit
-		] );
-
-		var custom = _controller.Document.Clips.Where( x => x.Role == WeaponClipRole.Custom ).ToArray();
-		if ( custom.Length > 0 )
-		{
-			_clipCanvas.Layout.Add( Header( "CUSTOM", _clipCanvas ) );
-			foreach ( var clip in custom )
-				AddClipButton( clip );
-		}
-		_clipCanvas.Layout.AddStretchCell();
 
 		if ( _rigCanvas is not null )
 		{
@@ -250,7 +273,13 @@ public sealed class ClipRackPanel : Widget
 				? "Not started · choose Start, Duplicate, or Import."
 				: $"{selected.Readiness} · {selected.Duration:0.###} s at {selected.SampleRate:0.#} fps";
 		if ( _propertiesCanvas is not null )
+		{
 			BuildClipProperties( selected );
+			_propertiesCanvas.UpdateGeometry();
+			if ( _propertiesScroll is not null )
+				_propertiesScroll.VerticalScrollbar.Value = propertiesScroll;
+		}
+		_lastSelectedClipId = selectedClipId;
 	}
 
 	private void AddClipGroup( string name, IEnumerable<WeaponClipRole> roles )
@@ -400,27 +429,13 @@ public sealed class ClipRackPanel : Widget
 
 	private void AddClipButton( WeaponAnimationClip clip )
 	{
-		var marker = clip.Readiness switch
+		var button = new WeaponAnimatorButton( "", _clipCanvas )
 		{
-			ClipReadiness.NotStarted => "○",
-			ClipReadiness.Draft => "◐",
-			ClipReadiness.Ready => "●",
-			_ => "!"
+			Clicked = () => _controller.SelectClip( clip.Id )
 		};
-		var button = new WeaponAnimatorButton( $"{marker}  {clip.Name}", _clipCanvas )
-		{
-			Clicked = () => _controller.SelectClip( clip.Id ),
-			Tint = clip.Id == _controller.Document.Workspace.SelectedClipId
-				? WeaponAnimatorTheme.Cyan * 0.42f
-				: clip.Readiness switch
-				{
-					ClipReadiness.Ready => WeaponAnimatorTheme.Green * 0.24f,
-					ClipReadiness.Warning => WeaponAnimatorTheme.Coral * 0.28f,
-					_ => WeaponAnimatorTheme.Surface
-				},
-			ToolTip = clip.Readiness.ToString()
-		};
+		ApplyClipButtonAppearance( button, clip );
 		_clipCanvas.Layout.Add( button );
+		_clipButtons[clip.Id] = button;
 	}
 
 	private void StartSelectedFromDefault()
@@ -558,6 +573,62 @@ public sealed class ClipRackPanel : Widget
 			$"font-size: 9px; font-weight: 600; letter-spacing: 0.65px; color: {WeaponAnimatorTheme.Muted.Hex};" );
 		return label;
 	}
+
+	private int CapturePropertiesScroll( Guid selectedClipId )
+	{
+		if ( _propertiesScroll is null )
+			return 0;
+
+		if ( _lastSelectedClipId != Guid.Empty )
+			_propertyScrollByClip[_lastSelectedClipId] =
+				_propertiesScroll.VerticalScrollbar.Value;
+		return _lastSelectedClipId == selectedClipId
+			? _propertiesScroll.VerticalScrollbar.Value
+			: _propertyScrollByClip.GetValueOrDefault( selectedClipId );
+	}
+
+	private string ClipListSignature() => string.Join(
+		"|",
+		_controller.Document.Clips.Select( x =>
+			$"{x.Id}:{x.Role}:{x.Name}:{x.Readiness}" ) );
+
+	private void RefreshClipButtons()
+	{
+		foreach ( var clip in _controller.Document.Clips )
+		{
+			if ( !_clipButtons.TryGetValue( clip.Id, out var button ) )
+				continue;
+			ApplyClipButtonAppearance( button, clip );
+		}
+	}
+
+	private void ApplyClipButtonAppearance(
+		WeaponAnimatorButton button,
+		WeaponAnimationClip clip )
+	{
+		var marker = clip.Readiness switch
+		{
+			ClipReadiness.NotStarted => "○",
+			ClipReadiness.Draft => "◐",
+			ClipReadiness.Ready => "●",
+			_ => "!"
+		};
+		button.Text = $"{marker}  {clip.Name}";
+		button.Tint = clip.Id == _controller.Document.Workspace.SelectedClipId
+			? WeaponAnimatorTheme.Cyan * 0.42f
+			: clip.Readiness switch
+			{
+				ClipReadiness.Ready => WeaponAnimatorTheme.Green * 0.24f,
+				ClipReadiness.Warning => WeaponAnimatorTheme.Coral * 0.28f,
+				_ => WeaponAnimatorTheme.Surface
+			};
+		button.ToolTip = clip.Readiness.ToString();
+	}
+
+	internal ScrollArea ClipScroll => _clipScroll;
+	internal ScrollArea? PropertiesScroll => _propertiesScroll;
+	internal WeaponAnimatorButton? GetClipButton( Guid clipId ) =>
+		_clipButtons.GetValueOrDefault( clipId );
 }
 
 public sealed class AnimationInspectorPanel : Widget

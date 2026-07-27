@@ -1125,6 +1125,38 @@ public static class WeaponAnimatorSelfTests
 			controller,
 			clipsOnly: true,
 			showClipHeader: false );
+		var idleClip = document.EnsureClip( WeaponClipRole.Idle );
+		var deployClip = document.EnsureClip( WeaponClipRole.Deploy );
+		var idleButton = clips.GetClipButton( idleClip.Id );
+		var deployButton = clips.GetClipButton( deployClip.Id );
+		clips.ClipScroll.VerticalScrollbar.Maximum = 500;
+		clips.ClipScroll.VerticalScrollbar.Value = 118;
+		clips.PropertiesScroll!.VerticalScrollbar.Maximum = 500;
+		clips.PropertiesScroll.VerticalScrollbar.Value = 37;
+		controller.SelectClip( deployClip.Id );
+		Equal(
+			report,
+			118,
+			clips.ClipScroll.VerticalScrollbar.Value,
+			"Changing clips must preserve the clip-rack scroll position." );
+		Equal(
+			report,
+			0,
+			clips.PropertiesScroll.VerticalScrollbar.Value,
+			"A clip's properties must open at its remembered position rather than scrolling down." );
+		Check(
+			report,
+			ReferenceEquals( idleButton, clips.GetClipButton( idleClip.Id ) )
+				&& ReferenceEquals( deployButton, clips.GetClipButton( deployClip.Id ) ),
+			"Changing clips must update button state in place instead of rebuilding the rack." );
+		clips.PropertiesScroll.VerticalScrollbar.Maximum = 500;
+		clips.PropertiesScroll.VerticalScrollbar.Value = 19;
+		controller.SelectClip( idleClip.Id );
+		Equal(
+			report,
+			37,
+			clips.PropertiesScroll.VerticalScrollbar.Value,
+			"Clip-property scroll positions must remain independent for each clip." );
 		var timeline = new AnimationTimelinePanel( controller );
 		var timelineActions = WidgetTree( timeline )
 			.OfType<WeaponAnimatorButton>()
