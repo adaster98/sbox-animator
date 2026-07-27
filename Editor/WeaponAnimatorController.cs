@@ -16,11 +16,14 @@ public sealed class WeaponAnimatorController
 	private string? _continuousBefore;
 	private string _continuousDescription = "";
 	private bool _continuousWasDirty;
+	private bool _isPlaying;
+	private float _playbackTime;
 
 	public WeaponAnimationDocument Document { get; private set; } = WeaponAnimationDocument.CreateDefault();
 	public bool IsDirty { get; private set; }
 	public string LastAction { get; private set; } = "";
 	public IReadOnlyCollection<Guid> SelectedKeys => _selectedKeys;
+	public bool IsPlaying => _isPlaying;
 
 	private readonly HashSet<Guid> _selectedKeys = [];
 
@@ -29,6 +32,8 @@ public sealed class WeaponAnimatorController
 	public event Action? SelectionChanged;
 	public event Action? DirtyChanged;
 	public event Action? TimelineChanged;
+	public event Action? TimelineViewChanged;
+	public event Action? PlaybackChanged;
 
 	public bool CanUndo => _undo.Count > 0;
 	public bool CanRedo => _redo.Count > 0;
@@ -41,11 +46,14 @@ public sealed class WeaponAnimatorController
 		_undo.Clear();
 		_redo.Clear();
 		_selectedKeys.Clear();
+		_isPlaying = false;
+		_playbackTime = 0;
 		IsDirty = false;
 		LastAction = "";
 		DocumentChanged?.Invoke();
 		SelectionChanged?.Invoke();
 		DirtyChanged?.Invoke();
+		PlaybackChanged?.Invoke();
 	}
 
 	public void Mutate( string description, Action<WeaponAnimationDocument> mutation )
@@ -143,6 +151,7 @@ public sealed class WeaponAnimatorController
 	public void Undo()
 	{
 		EndContinuousEdit();
+		SetPlaying( false );
 		if ( _undo.Count == 0 )
 			return;
 
@@ -159,6 +168,7 @@ public sealed class WeaponAnimatorController
 	public void Redo()
 	{
 		EndContinuousEdit();
+		SetPlaying( false );
 		if ( _redo.Count == 0 )
 			return;
 
@@ -205,6 +215,7 @@ public sealed class WeaponAnimatorController
 		Document.Workspace.SelectedClipId = clipId;
 		Document.Workspace.TimelineTime = 0;
 		_selectedKeys.Clear();
+		SetPlaying( false );
 		SelectionChanged?.Invoke();
 		DocumentChanged?.Invoke();
 	}
@@ -212,13 +223,125 @@ public sealed class WeaponAnimatorController
 	public void SetTimelineTime( float time )
 	{
 		var clip = Document.GetSelectedClip();
-		var maximum = clip?.Duration ?? 0;
-		var clamped = Math.Clamp( time, 0, maximum );
-		if ( MathF.Abs( Document.Workspace.TimelineTime - clamped ) <= 0.00001f )
+		if ( clip is null )
+			return;
+		SetPlaying( false );
+		SetTimelineFrameInternal(
+			TimelineInteraction.TimeToFrame( time, clip.SampleRate ),
+			clip );
+	}
+
+	public void SetTimelineFrame( int frame )
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is null )
+			return;
+		SetPlaying( false );
+		SetTimelineFrameInternal( frame, clip );
+	}
+
+	public void StepTimelineFrame( int delta )
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is null )
+			return;
+		var current = TimelineInteraction.TimeToFrame(
+			Document.Workspace.TimelineTime,
+			clip.SampleRate );
+		SetTimelineFrame( current + delta );
+	}
+
+	public void JumpToFirstFrame() => SetTimelineFrame( 0 );
+
+	public void JumpToLastFrame()
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is not null )
+			SetTimelineFrame( TimelineInteraction.LastFrame( clip ) );
+	}
+
+	public void TogglePlayback()
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is null )
+			return;
+		if ( _isPlaying )
+		{
+			SetPlaying( false );
+			return;
+		}
+
+		var frame = TimelineInteraction.TimeToFrame(
+			Document.Workspace.TimelineTime,
+			clip.SampleRate );
+		if ( frame >= TimelineInteraction.LastFrame( clip ) )
+			SetTimelineFrameInternal( 0, clip );
+		_playbackTime = Document.Workspace.TimelineTime;
+		SetPlaying( true );
+	}
+
+	public void PausePlayback() => SetPlaying( false );
+
+	public void AdvancePlayback( float delta )
+	{
+		var clip = Document.GetSelectedClip();
+		if ( !_isPlaying || clip is null || clip.Duration <= 0 )
 			return;
 
-		Document.Workspace.TimelineTime = clamped;
-		TimelineChanged?.Invoke();
+		_playbackTime += MathF.Max( delta, 0 );
+		if ( _playbackTime > clip.Duration )
+		{
+			if ( clip.Loop )
+				_playbackTime %= clip.Duration;
+			else
+			{
+				_playbackTime = TimelineInteraction.FrameToTime(
+					TimelineInteraction.LastFrame( clip ),
+					clip.SampleRate );
+				SetPlaying( false );
+			}
+		}
+
+		SetTimelineFrameInternal(
+			TimelineInteraction.TimeToFrame( _playbackTime, clip.SampleRate ),
+			clip,
+			syncPlaybackTime: false );
+	}
+
+	internal TimelineFrameRange GetTimelineRange( WeaponAnimationClip clip ) =>
+		TimelineInteraction.ResolveRange(
+			clip,
+			Document.Workspace.GetTimelineView( clip.Id ) );
+
+	internal void SetTimelineRange( WeaponAnimationClip clip, TimelineFrameRange range )
+	{
+		var current = GetTimelineRange( clip );
+		if ( current == range )
+			return;
+
+		var state = Document.Workspace.EnsureTimelineView( clip.Id, clip.Duration );
+		state.VisibleStart = TimelineInteraction.FrameToTime(
+			range.StartFrame,
+			clip.SampleRate );
+		state.VisibleEnd = TimelineInteraction.FrameToTime(
+			range.EndFrame,
+			clip.SampleRate );
+		LastAction = "Timeline zoom";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SetTimelineVerticalScroll( WeaponAnimationClip clip, float value )
+	{
+		var state = Document.Workspace.EnsureTimelineView( clip.Id, clip.Duration );
+		value = MathF.Max( value, 0 );
+		if ( MathF.Abs( state.VerticalScroll - value ) <= 0.5f )
+			return;
+
+		state.VerticalScroll = value;
+		LastAction = "Timeline scroll";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
 	}
 
 	public void SelectKeys( IEnumerable<Guid> keyIds, bool additive )
@@ -229,6 +352,70 @@ public sealed class WeaponAnimatorController
 		foreach ( var key in keyIds )
 			_selectedKeys.Add( key );
 		SelectionChanged?.Invoke();
+	}
+
+	public void SetSelectedKeys( IEnumerable<Guid> keyIds )
+	{
+		var next = keyIds.ToHashSet();
+		if ( _selectedKeys.SetEquals( next ) )
+			return;
+		_selectedKeys.Clear();
+		foreach ( var keyId in next )
+			_selectedKeys.Add( keyId );
+		SelectionChanged?.Invoke();
+	}
+
+	public void ToggleSelectedKeys( IEnumerable<Guid> keyIds )
+	{
+		foreach ( var keyId in keyIds )
+		{
+			if ( !_selectedKeys.Remove( keyId ) )
+				_selectedKeys.Add( keyId );
+		}
+		SelectionChanged?.Invoke();
+	}
+
+	public void BeginSelectedKeyMove()
+	{
+		if ( _selectedKeys.Count > 0 )
+		{
+			SetPlaying( false );
+			BeginContinuousEdit( "Move keys" );
+		}
+	}
+
+	public void UpdateSelectedKeyMove(
+		IReadOnlyDictionary<Guid, float> startTimes,
+		int deltaFrames )
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is null || startTimes.Count == 0 )
+			return;
+
+		UpdateContinuousEdit( _ =>
+		{
+			IdleBindPoseService.MarkAuthored( clip );
+			ApplySelectedKeyMove( clip, startTimes, deltaFrames );
+		} );
+	}
+
+	public void EndSelectedKeyMove(
+		IReadOnlyDictionary<Guid, float> startTimes,
+		int deltaFrames )
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is null || startTimes.Count == 0 )
+		{
+			EndContinuousEdit();
+			return;
+		}
+
+		UpdateContinuousEdit( _ =>
+		{
+			ApplySelectedKeyMove( clip, startTimes, deltaFrames );
+			RemoveKeyCollisions( clip );
+		} );
+		EndContinuousEdit();
 	}
 
 	public void CopySelectedKeys()
@@ -311,10 +498,9 @@ public sealed class WeaponAnimatorController
 				{
 					var key = Json.Deserialize<TransformKey>( Json.Serialize( sourceKey ) )!;
 					key.Id = Guid.NewGuid();
-					key.Time = WeaponAnimationMath.SnapTime(
-						pasteTime + sourceKey.Time - payload.Origin,
-						clip.SampleRate,
-						clip.AllowSubframeKeys );
+					key.Time = TimelineInteraction.SnapTime(
+						clip,
+						pasteTime + sourceKey.Time - payload.Origin );
 					targetTrack.Keys.Add( key );
 					_selectedKeys.Add( key.Id );
 				}
@@ -331,10 +517,9 @@ public sealed class WeaponAnimatorController
 				{
 					var key = Json.Deserialize<VisibilityKey>( Json.Serialize( sourceKey ) )!;
 					key.Id = Guid.NewGuid();
-					key.Time = WeaponAnimationMath.SnapTime(
-						pasteTime + sourceKey.Time - payload.Origin,
-						clip.SampleRate,
-						clip.AllowSubframeKeys );
+					key.Time = TimelineInteraction.SnapTime(
+						clip,
+						pasteTime + sourceKey.Time - payload.Origin );
 					targetTrack.Keys.Add( key );
 					_selectedKeys.Add( key.Id );
 				}
@@ -391,10 +576,9 @@ public sealed class WeaponAnimatorController
 		if ( clip is null )
 			return;
 
-		var snapped = WeaponAnimationMath.SnapTime(
-			Document.Workspace.TimelineTime,
-			clip.SampleRate,
-			clip.AllowSubframeKeys );
+		var snapped = TimelineInteraction.SnapTime(
+			clip,
+			Document.Workspace.TimelineTime );
 
 		Mutate( $"Key {target}", _ =>
 		{
@@ -447,10 +631,9 @@ public sealed class WeaponAnimatorController
 				return;
 			}
 
-			var snapped = WeaponAnimationMath.SnapTime(
-				document.Workspace.TimelineTime,
-				clip.SampleRate,
-				clip.AllowSubframeKeys );
+			var snapped = TimelineInteraction.SnapTime(
+				clip,
+				document.Workspace.TimelineTime );
 			IdleBindPoseService.MarkAuthored( clip );
 			var track = clip.EnsureTrack( target );
 			track.Kind = kind;
@@ -490,10 +673,9 @@ public sealed class WeaponAnimatorController
 		var clip = Document.GetSelectedClip();
 		if ( clip is null )
 			return false;
-		var snapped = WeaponAnimationMath.SnapTime(
-			Document.Workspace.TimelineTime,
-			clip.SampleRate,
-			clip.AllowSubframeKeys );
+		var snapped = TimelineInteraction.SnapTime(
+			clip,
+			Document.Workspace.TimelineTime );
 		return clip.Tracks
 			.FirstOrDefault( x => x.Target.Equals( target, StringComparison.OrdinalIgnoreCase ) )?
 			.Keys.Any( x => MathF.Abs( x.Time - snapped ) <= 0.0001f ) == true;
@@ -562,10 +744,9 @@ public sealed class WeaponAnimatorController
 		var clip = Document.GetSelectedClip();
 		if ( clip is null )
 			return false;
-		var snapped = WeaponAnimationMath.SnapTime(
-			Document.Workspace.TimelineTime,
-			clip.SampleRate,
-			clip.AllowSubframeKeys );
+		var snapped = TimelineInteraction.SnapTime(
+			clip,
+			Document.Workspace.TimelineTime );
 		return clip.VisibilityTracks.FirstOrDefault( x => x.PartId == partId )?
 			.Keys.Any( x => MathF.Abs( x.Time - snapped ) <= 0.0001f ) == true;
 	}
@@ -577,10 +758,9 @@ public sealed class WeaponAnimatorController
 		if ( clip is null || part is null )
 			return;
 
-		var snapped = WeaponAnimationMath.SnapTime(
-			Document.Workspace.TimelineTime,
-			clip.SampleRate,
-			clip.AllowSubframeKeys );
+		var snapped = TimelineInteraction.SnapTime(
+			clip,
+			Document.Workspace.TimelineTime );
 		Mutate( $"{(visible ? "Show" : "Hide")} {part.Name}", _ =>
 		{
 			IdleBindPoseService.MarkAuthored( clip );
@@ -603,10 +783,9 @@ public sealed class WeaponAnimatorController
 		var part = Document.Rig.VisibilityParts.FirstOrDefault( x => x.Id == partId );
 		if ( clip is null || part is null )
 			return;
-		var snapped = WeaponAnimationMath.SnapTime(
-			Document.Workspace.TimelineTime,
-			clip.SampleRate,
-			clip.AllowSubframeKeys );
+		var snapped = TimelineInteraction.SnapTime(
+			clip,
+			Document.Workspace.TimelineTime );
 		Mutate( $"Remove {part.Name} visibility key", _ =>
 		{
 			var track = clip.VisibilityTracks.FirstOrDefault( x => x.PartId == partId );
@@ -629,6 +808,88 @@ public sealed class WeaponAnimatorController
 			: string.Join( " ", words
 				.Split( ' ', StringSplitOptions.RemoveEmptyEntries )
 				.Select( x => char.ToUpperInvariant( x[0] ) + x[1..] ) );
+	}
+
+	private void SetTimelineFrameInternal(
+		int frame,
+		WeaponAnimationClip clip,
+		bool syncPlaybackTime = true )
+	{
+		frame = Math.Clamp( frame, 0, TimelineInteraction.LastFrame( clip ) );
+		var time = TimelineInteraction.FrameToTime( frame, clip.SampleRate );
+		if ( syncPlaybackTime )
+			_playbackTime = time;
+		if ( MathF.Abs( Document.Workspace.TimelineTime - time ) <= 0.00001f )
+			return;
+
+		Document.Workspace.TimelineTime = time;
+		TimelineChanged?.Invoke();
+	}
+
+	private void SetPlaying( bool value )
+	{
+		if ( _isPlaying == value )
+			return;
+		_isPlaying = value;
+		PlaybackChanged?.Invoke();
+	}
+
+	private static void ApplySelectedKeyMove(
+		WeaponAnimationClip clip,
+		IReadOnlyDictionary<Guid, float> startTimes,
+		int deltaFrames )
+	{
+		foreach ( var key in clip.Tracks.SelectMany( x => x.Keys ) )
+		{
+			if ( !startTimes.TryGetValue( key.Id, out var start ) )
+				continue;
+			var frame = TimelineInteraction.TimeToFrame( start, clip.SampleRate ) + deltaFrames;
+			key.Time = TimelineInteraction.FrameToTime(
+				Math.Clamp( frame, 0, TimelineInteraction.LastFrame( clip ) ),
+				clip.SampleRate );
+		}
+
+		foreach ( var key in clip.VisibilityTracks.SelectMany( x => x.Keys ) )
+		{
+			if ( !startTimes.TryGetValue( key.Id, out var start ) )
+				continue;
+			var frame = TimelineInteraction.TimeToFrame( start, clip.SampleRate ) + deltaFrames;
+			key.Time = TimelineInteraction.FrameToTime(
+				Math.Clamp( frame, 0, TimelineInteraction.LastFrame( clip ) ),
+				clip.SampleRate );
+		}
+
+		foreach ( var track in clip.Tracks )
+			track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+		foreach ( var track in clip.VisibilityTracks )
+			track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+	}
+
+	private void RemoveKeyCollisions( WeaponAnimationClip clip )
+	{
+		foreach ( var track in clip.Tracks )
+		{
+			var occupied = track.Keys
+				.Where( x => _selectedKeys.Contains( x.Id ) )
+				.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
+				.ToHashSet();
+			track.Keys.RemoveAll( x =>
+				!_selectedKeys.Contains( x.Id )
+				&& occupied.Contains(
+					TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) ) );
+		}
+
+		foreach ( var track in clip.VisibilityTracks )
+		{
+			var occupied = track.Keys
+				.Where( x => _selectedKeys.Contains( x.Id ) )
+				.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
+				.ToHashSet();
+			track.Keys.RemoveAll( x =>
+				!_selectedKeys.Contains( x.Id )
+				&& occupied.Contains(
+					TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) ) );
+		}
 	}
 
 	private void SetDirty( bool value )

@@ -210,7 +210,6 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private int _armPoseDiagnosticFrames;
 	private Vector2 _lastMouse;
 	private readonly Dictionary<string, Transform> _testPose = new( StringComparer.OrdinalIgnoreCase );
-	private float _playbackTime;
 	private string _animationGizmoTarget = "";
 	private RigControlKind _animationGizmoKind;
 	private Transform _animationGizmoStartLocal;
@@ -221,7 +220,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private RealTimeSince _sinceCameraSpeedChanged = 99;
 
 	public ViewportPickMode PickMode { get; set; }
-	public bool IsPlaying { get; private set; }
+	public bool IsPlaying => _controller.IsPlaying;
 	public WeaponAnimatorTransformMode TransformMode { get; private set; }
 	public Vector3 ModelDimensions => _sourceRenderer?.Model?.Bounds.Size ?? Vector3.Zero;
 	public event Action<string>? StatusChanged;
@@ -356,13 +355,12 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 	public void TogglePlayback()
 	{
-		IsPlaying = !IsPlaying;
-		_playbackTime = _controller.Document.Workspace.TimelineTime;
+		_controller.TogglePlayback();
 	}
 
 	public void StopPlayback()
 	{
-		IsPlaying = false;
+		_controller.PausePlayback();
 	}
 
 	public void SetTransformMode( WeaponAnimatorTransformMode mode )
@@ -847,25 +845,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 	private void AdvancePlayback()
 	{
-		if ( !IsPlaying )
-			return;
-
-		var clip = _controller.Document.GetSelectedClip();
-		if ( clip is null || clip.Duration <= 0 )
-			return;
-
-		_playbackTime += RealTime.Delta;
-		if ( _playbackTime > clip.Duration )
-		{
-			if ( clip.Loop )
-				_playbackTime %= clip.Duration;
-			else
-			{
-				_playbackTime = clip.Duration;
-				IsPlaying = false;
-			}
-		}
-		_controller.SetTimelineTime( _playbackTime );
+		_controller.AdvancePlayback( RealTime.Delta );
 	}
 
 	private void UpdateCamera()

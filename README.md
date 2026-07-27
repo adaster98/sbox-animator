@@ -30,6 +30,12 @@ confirms the current speed.
 With Auto-key disabled, transform edits are saved as per-clip working poses until **Key pose**
 or **Add key** commits them. Working poses are editor-only and never affect generated SMDs,
 hashes, onion skins, or prefab playback.
+The dope sheet keeps a full-clip range navigator above its frame ruler. Drag its handles to
+set the visible range, drag the highlighted region to pan, or use **Ctrl+scroll** to zoom
+around the current midpoint. The ruler and playhead scrub in whole frames. The key grid is
+reserved for click and marquee selection, and selected transform or visibility keys can be
+dragged together as one undoable frame-snapped edit. A guttered vertical scrollbar exposes
+every track while keeping the frame ruler and track-name column fixed.
 
 Viewport guides are disabled for new projects. Grid opacity and line weight can be previewed
 live from **Edit → Preferences**; both settings affect the minor, major, and colored origin

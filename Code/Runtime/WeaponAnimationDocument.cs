@@ -579,6 +579,7 @@ public sealed class WorkspaceState
 	public float RotationSnapDegrees { get; set; } = 15.0f;
 	public bool CurveEditorVisible { get; set; }
 	public List<WorkingPoseOverride> WorkingPoseOverrides { get; set; } = [];
+	public List<TimelineViewState> TimelineViews { get; set; } = [];
 	public Vector3 CameraFocus { get; set; }
 	public Angles CameraAngles { get; set; } = new( 12, 180, 0 );
 	public float CameraDistance { get; set; } = 48.0f;
@@ -594,6 +595,24 @@ public sealed class WorkspaceState
 	public string AnimationRightSplitterState { get; set; } = "";
 	public string AnimationMainSplitterState { get; set; } = "";
 	public string AnimationOuterSplitterState { get; set; } = "";
+
+	public TimelineViewState? GetTimelineView( Guid clipId ) =>
+		TimelineViews.FirstOrDefault( x => x.ClipId == clipId );
+
+	public TimelineViewState EnsureTimelineView( Guid clipId, float duration )
+	{
+		var existing = GetTimelineView( clipId );
+		if ( existing is not null )
+			return existing;
+
+		existing = new TimelineViewState
+		{
+			ClipId = clipId,
+			VisibleEnd = MathF.Max( duration, 0 )
+		};
+		TimelineViews.Add( existing );
+		return existing;
+	}
 
 	public WorkingPoseOverride? GetWorkingPose( Guid clipId, string target ) =>
 		WorkingPoseOverrides.FirstOrDefault( x =>
@@ -630,6 +649,14 @@ public sealed class WorkspaceState
 
 	public void ClearWorkingPoses( Guid clipId ) =>
 		WorkingPoseOverrides.RemoveAll( x => x.ClipId == clipId );
+}
+
+public sealed class TimelineViewState
+{
+	public Guid ClipId { get; set; }
+	public float VisibleStart { get; set; }
+	public float VisibleEnd { get; set; }
+	public float VerticalScroll { get; set; }
 }
 
 public sealed class WorkingPoseOverride

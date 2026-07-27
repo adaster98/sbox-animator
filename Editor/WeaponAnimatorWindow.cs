@@ -50,7 +50,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		_controller.DocumentChanged += OnDocumentChanged;
 		_controller.DirtyChanged += OnDirtyChanged;
 		_controller.SelectionChanged += RefreshToolbarState;
-		_controller.TimelineChanged += RefreshToolbarState;
+		_controller.PlaybackChanged += RefreshToolbarState;
 
 		BuildMenuBar();
 		BuildWorkspace();
@@ -861,14 +861,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 	private void TogglePlayback()
 	{
-		_viewport?.TogglePlayback();
-		if ( _playButton is not null )
-		{
-			_playButton.Text = _viewport?.IsPlaying == true ? "Pause" : "Play";
-			_playButton.Icon = _viewport?.IsPlaying == true ? "pause" : "play_arrow";
-			if ( _playButton is WeaponAnimatorButton playButton )
-				playButton.FitToContent( true );
-		}
+		_controller.TogglePlayback();
 	}
 
 	private void ResetWorkspace()
@@ -891,6 +884,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			state.AnimationRightSplitterState = "";
 			state.AnimationMainSplitterState = "";
 			state.AnimationOuterSplitterState = "";
+			state.TimelineViews.Clear();
 		} );
 		BuildWorkspace();
 		_viewport?.FitCamera();
@@ -942,6 +936,13 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		_validationButton.Tint = report.IsValid
 			? report.WarningCount > 0 ? WeaponAnimatorTheme.Amber * 0.45f : WeaponAnimatorTheme.Green * 0.45f
 			: WeaponAnimatorTheme.Coral * 0.5f;
+		if ( _playButton is not null )
+		{
+			_playButton.Text = _controller.IsPlaying ? "Pause" : "Play";
+			_playButton.Icon = _controller.IsPlaying ? "pause" : "play_arrow";
+			if ( _playButton is WeaponAnimatorButton playButton )
+				playButton.FitToContent( true );
+		}
 		_toolbar?.BalanceCenter();
 	}
 

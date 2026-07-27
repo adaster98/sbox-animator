@@ -44,6 +44,9 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "alignment", TestAlignment );
 		Run( report, "track interpolation", TestInterpolation );
 		Run( report, "frame snapping", TestFrameSnapping );
+		Run( report, "timeline navigation", TestTimelineNavigation );
+		Run( report, "timeline selection and movement", TestTimelineSelectionAndMovement );
+		Run( report, "timeline playback", TestTimelinePlayback );
 		Run( report, "two-bone IK", TestTwoBoneIk );
 		Run( report, "IK descendant propagation", TestIkDescendantPropagation );
 		Run( report, "timed constraints before IK", TestConstraintDrivenIk );
@@ -1121,6 +1124,27 @@ public static class WeaponAnimatorSelfTests
 			clipsOnly: true,
 			showClipHeader: false );
 		var timeline = new AnimationTimelinePanel( controller );
+		var timelineActions = WidgetTree( timeline )
+			.OfType<WeaponAnimatorButton>()
+			.Where( x => x.Text is "Add key" or "Copy" or "Paste" or "Mirror" or "Curves" )
+			.ToArray();
+		Equal(
+			report,
+			5,
+			timelineActions.Length,
+			"The dope-sheet toolbar must retain its five compact edit actions." );
+		Check(
+			report,
+			timelineActions.All( x =>
+				x.MinimumWidth >= x.PreferredWidth
+				&& x.MinimumWidth <= MathF.Ceiling( x.PreferredWidth ) + 0.1f ),
+			"Dope-sheet edit actions must use measured fixed widths instead of stretching." );
+		Near(
+			report,
+			500,
+			TimelineControlToolbar.CenteredLeft( 1000, 150 ) + 75,
+			0.0001f,
+			"Timeline transport controls must be centered independently of unequal side content." );
 		controller.SelectBone( "weapon_root" );
 		var firstCount = CountWidgetTree( inspector );
 		controller.SelectControl( "@primary_hand" );
@@ -1144,6 +1168,16 @@ public static class WeaponAnimatorSelfTests
 
 	private static int CountWidgetTree( Widget widget ) =>
 		1 + widget.Children.Sum( CountWidgetTree );
+
+	private static IEnumerable<Widget> WidgetTree( Widget widget )
+	{
+		yield return widget;
+		foreach ( var child in widget.Children )
+		{
+			foreach ( var descendant in WidgetTree( child ) )
+				yield return descendant;
+		}
+	}
 
 	private static void TestAlignment( WeaponAnimatorSelfTestReport report )
 	{
@@ -1199,6 +1233,188 @@ public static class WeaponAnimatorSelfTests
 	{
 		Near( report, 10.0f / 30.0f, WeaponAnimationMath.SnapTime( 0.34f, 30, false ), 0.0001f, "Frame snapping must select the nearest frame." );
 		Near( report, 0.34f, WeaponAnimationMath.SnapTime( 0.34f, 30, true ), 0.0001f, "Subframe keys must preserve time." );
+	}
+
+	private static void TestTimelineNavigation( WeaponAnimatorSelfTestReport report )
+	{
+		var document = WeaponAnimationDocument.CreateDefault( "Timeline navigation" );
+		var clip = document.GetSelectedClip()!;
+		clip.Duration = 10;
+		clip.SampleRate = 30;
+		var full = TimelineInteraction.ResolveRange( clip, null );
+		Equal( report, 0, full.StartFrame, "A new timeline view must begin at frame zero." );
+		Equal( report, 300, full.EndFrame, "A new timeline view must cover the complete clip." );
+
+		var zoomed = TimelineInteraction.Zoom( new TimelineFrameRange( 60, 240 ), 300, true );
+		Equal( report, 144, zoomed.Span, "Ctrl+wheel zoom must reduce the visible frame span." );
+		Equal(
+			report,
+			300,
+			zoomed.StartFrame + zoomed.EndFrame,
+			"Ctrl+wheel zoom must preserve the range midpoint." );
+		var panned = TimelineInteraction.Pan( zoomed, 500, 300 );
+		Equal( report, 300, panned.EndFrame, "Range panning must clamp at the clip end." );
+		var minimum = TimelineInteraction.ResizeStart(
+			new TimelineFrameRange( 0, 10 ),
+			10,
+			300 );
+		Equal(
+			report,
+			TimelineInteraction.MinimumVisibleFrameIntervals,
+			minimum.Span,
+			"Range handles must retain the minimum two-frame interval." );
+
+		var closeTicks = TimelineInteraction.TickSpacing( 10 );
+		var wideTicks = TimelineInteraction.TickSpacing( 0.5f );
+		Equal( report, 1, closeTicks.MinorFrames, "Zoomed timelines must expose individual frame ticks." );
+		Check(
+			report,
+			wideTicks.MinorFrames > closeTicks.MinorFrames
+				&& wideTicks.MajorFrames > closeTicks.MajorFrames,
+			"Tick spacing must become coarser as the visible frame density increases." );
+
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+		controller.SetTimelineRange( clip, new TimelineFrameRange( 30, 90 ) );
+		controller.SetTimelineVerticalScroll( clip, 132 );
+		var state = document.Workspace.GetTimelineView( clip.Id );
+		Check(
+			report,
+			state is not null,
+			"Changing a timeline view must create its per-clip workspace state." );
+		Near( report, 1, state!.VisibleStart, 0.0001f, "Timeline range start must persist in seconds." );
+		Near( report, 3, state.VisibleEnd, 0.0001f, "Timeline range end must persist in seconds." );
+		Near( report, 132, state.VerticalScroll, 0.0001f, "Vertical track scroll must persist per clip." );
+
+		clip.Tracks.Add( new TransformTrack { Target = "one" } );
+		clip.Tracks.Add( new TransformTrack { Target = "two" } );
+		document.Rig.VisibilityParts.Add( new WeaponVisibilityPart() );
+		Equal(
+			report,
+			4,
+			TimelineInteraction.TrackRowCount( document, clip ),
+			"Timeline row count must include every transform track, visibility track, and the tag row." );
+	}
+
+	private static void TestTimelineSelectionAndMovement( WeaponAnimatorSelfTestReport report )
+	{
+		var first = Guid.NewGuid();
+		var second = Guid.NewGuid();
+		var third = Guid.NewGuid();
+		var replaced = TimelineInteraction.CombineKeySelection(
+			[first],
+			[second, third],
+			additive: false,
+			toggle: false );
+		Check(
+			report,
+			replaced.SetEquals( [second, third] ),
+			"A plain marquee must replace the previous key selection." );
+		var added = TimelineInteraction.CombineKeySelection(
+			[first],
+			[second],
+			additive: true,
+			toggle: false );
+		Check(
+			report,
+			added.SetEquals( [first, second] ),
+			"Shift-marquee must add intersected keys." );
+		var toggled = TimelineInteraction.CombineKeySelection(
+			[first, second],
+			[second, third],
+			additive: false,
+			toggle: true );
+		Check(
+			report,
+			toggled.SetEquals( [first, third] ),
+			"Ctrl-marquee must toggle every intersected key." );
+		Equal(
+			report,
+			-2,
+			TimelineInteraction.ClampGroupFrameDelta( [2, 5], -20, 30 ),
+			"Moving keys before frame zero must clamp the group as a unit." );
+		Equal(
+			report,
+			25,
+			TimelineInteraction.ClampGroupFrameDelta( [2, 5], 40, 30 ),
+			"Moving keys past the clip end must preserve their internal spacing." );
+
+		var document = WeaponAnimationDocument.CreateDefault( "Timeline key move" );
+		var clip = document.GetSelectedClip()!;
+		clip.Duration = 1;
+		clip.SampleRate = 30;
+		var track = clip.EnsureTrack( "weapon_root" );
+		var keyA = WeaponAnimationMath.UpsertKey( track, 2f / 30, Transform.Zero );
+		var keyB = WeaponAnimationMath.UpsertKey( track, 5f / 30, Transform.Zero );
+		WeaponAnimationMath.UpsertKey( track, 7f / 30, Transform.Zero );
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+		controller.SetSelectedKeys( [keyA.Id, keyB.Id] );
+		var starts = new Dictionary<Guid, float>
+		{
+			[keyA.Id] = keyA.Time,
+			[keyB.Id] = keyB.Time
+		};
+		controller.BeginSelectedKeyMove();
+		controller.UpdateSelectedKeyMove( starts, 2 );
+		controller.EndSelectedKeyMove( starts, 2 );
+		Equal(
+			report,
+			2,
+			track.Keys.Count,
+			"A moved key must replace an unselected key occupying its destination frame." );
+		Check(
+			report,
+			track.Keys.Select( x => TimelineInteraction.TimeToFrame( x.Time, 30 ) )
+				.SequenceEqual( [4, 7] ),
+			"Selected keys must move by the same snapped frame delta." );
+		controller.Undo();
+		clip = controller.Document.GetSelectedClip()!;
+		Equal(
+			report,
+			3,
+			clip.EnsureTrack( "weapon_root" ).Keys.Count,
+			"A complete key drag must undo as one action." );
+	}
+
+	private static void TestTimelinePlayback( WeaponAnimatorSelfTestReport report )
+	{
+		var document = WeaponAnimationDocument.CreateDefault( "Timeline playback" );
+		var clip = document.GetSelectedClip()!;
+		clip.Duration = 1;
+		clip.SampleRate = 30;
+		clip.Loop = false;
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+
+		controller.SetTimelineTime( 0.01f );
+		Near( report, 0, document.Workspace.TimelineTime, 0.0001f, "Timeline seeking must reject fractional-frame positions." );
+		controller.SetTimelineTime( 0.02f );
+		Near( report, 1f / 30, document.Workspace.TimelineTime, 0.0001f, "Timeline seeking must snap to the nearest whole frame." );
+		controller.JumpToLastFrame();
+		controller.TogglePlayback();
+		Check( report, controller.IsPlaying, "Play must enter the shared playback state." );
+		Near( report, 0, document.Workspace.TimelineTime, 0.0001f, "Playing from the last frame must restart at frame zero." );
+		controller.AdvancePlayback( 0.04f );
+		Equal(
+			report,
+			1,
+			TimelineInteraction.TimeToFrame( document.Workspace.TimelineTime, 30 ),
+			"Playback must advance through whole-frame preview positions." );
+		controller.StepTimelineFrame( 1 );
+		Check( report, !controller.IsPlaying, "Manual frame stepping must pause playback." );
+		Equal(
+			report,
+			2,
+			TimelineInteraction.TimeToFrame( document.Workspace.TimelineTime, 30 ),
+			"Next-frame controls must advance exactly one frame." );
+		controller.JumpToLastFrame();
+		controller.StepTimelineFrame( 1 );
+		Equal(
+			report,
+			30,
+			TimelineInteraction.TimeToFrame( document.Workspace.TimelineTime, 30 ),
+			"Frame stepping must clamp at the final frame." );
 	}
 
 	private static void TestTwoBoneIk( WeaponAnimatorSelfTestReport report )

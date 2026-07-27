@@ -297,17 +297,6 @@ public sealed class ClipRackPanel : Widget
 				foreach ( var track in clip.Tracks )
 					track.Interpolation = interpolation;
 			} ) ) );
-		var subframes = new WeaponAnimatorButton( "Allow subframe keys", _propertiesCanvas )
-		{
-			IsToggle = true,
-			IsChecked = clip.AllowSubframeKeys,
-			Tint = WeaponAnimatorTheme.SurfaceRaised
-		};
-		subframes.Toggled = () => _controller.Mutate(
-			"Subframe keys",
-			_ => clip.AllowSubframeKeys = subframes.IsChecked );
-		_propertiesCanvas.Layout.Add( subframes );
-
 		_propertiesCanvas.Layout.Add( Header( "TAGS", _propertiesCanvas ) );
 		var tagRow = RigAuditPanel.Row( _propertiesCanvas );
 		var name = new LineEdit( tagRow )
@@ -443,6 +432,7 @@ public sealed class ClipRackPanel : Widget
 		_controller.Mutate( $"Start {clip.Name}", document =>
 		{
 			document.Workspace.ClearWorkingPoses( clip.Id );
+			document.Workspace.TimelineViews.RemoveAll( x => x.ClipId == clip.Id );
 			clip.VisibilityTracks.Clear();
 			var skeleton = HostSkeletonBuilder.Build( document );
 			if ( clip.Role == WeaponClipRole.Idle )
@@ -492,6 +482,8 @@ public sealed class ClipRackPanel : Widget
 		_controller.Mutate( $"Duplicate {source.Name}", _ =>
 		{
 			_controller.Document.Workspace.ClearWorkingPoses( destination.Id );
+			_controller.Document.Workspace.TimelineViews.RemoveAll( x =>
+				x.ClipId == destination.Id );
 			var copy = Json.Deserialize<WeaponAnimationClip>( Json.Serialize( source ) )!;
 			destination.Duration = copy.Duration;
 			destination.SampleRate = copy.SampleRate;
@@ -527,6 +519,8 @@ public sealed class ClipRackPanel : Widget
 				_controller.Mutate( $"Import {captured}", document =>
 				{
 					document.Workspace.ClearWorkingPoses( selected.Id );
+					document.Workspace.TimelineViews.RemoveAll( x =>
+						x.ClipId == selected.Id );
 					selected.IsBindPoseSeed = false;
 					result = SequenceImportService.Import( document, selected, captured );
 				} );
@@ -1148,8 +1142,10 @@ public sealed class AnimationInspectorPanel : Widget
 public sealed class AnimationTimelinePanel : Widget
 {
 	private readonly WeaponAnimatorController _controller;
-	private readonly TimelineCanvas _timeline;
+	private readonly TimelineEditorCanvas _timeline;
+	private readonly TimelineControlToolbar _toolbar;
 	private readonly Label _timeLabel;
+	private readonly WeaponAnimatorButton _playButton;
 
 	public AnimationTimelinePanel( WeaponAnimatorController controller, Widget? parent = null ) : base( parent )
 	{
@@ -1158,32 +1154,41 @@ public sealed class AnimationTimelinePanel : Widget
 		Layout.Margin = 0;
 		Layout.Spacing = 0;
 
-		var toolbar = new Widget( this ) { FixedHeight = 34 };
-		toolbar.SetStyles(
-			"background-color: rgb(24,27,30); border-bottom: 1px solid rgba(255,255,255,0.07);" );
-		toolbar.Layout = Layout.Row();
-		toolbar.Layout.Margin = new Sandbox.UI.Margin( 7, 4, 7, 4 );
-		toolbar.Layout.Spacing = 4;
-		toolbar.Layout.Add( WeaponAnimatorTheme.Button( "Add key", "key", AddKey, toolbar, true ) );
-		toolbar.Layout.Add( WeaponAnimatorTheme.Button( "Copy", "content_copy", _controller.CopySelectedKeys, toolbar ) );
-		toolbar.Layout.Add( WeaponAnimatorTheme.Button( "Paste", "content_paste", _controller.PasteKeys, toolbar ) );
-		toolbar.Layout.Add( WeaponAnimatorTheme.Button( "Mirror", "flip", _controller.MirrorSelectedKeys, toolbar ) );
-		toolbar.Layout.Add( WeaponAnimatorTheme.Button(
+		_toolbar = new TimelineControlToolbar( this );
+		var left = _toolbar.LeftSection;
+		left.Layout.Add( CompactAction( "Add key", "key", AddKey, left, true ) );
+		left.Layout.Add( CompactAction( "Copy", "content_copy", _controller.CopySelectedKeys, left ) );
+		left.Layout.Add( CompactAction( "Paste", "content_paste", _controller.PasteKeys, left ) );
+		left.Layout.Add( CompactAction( "Mirror", "flip", _controller.MirrorSelectedKeys, left ) );
+		left.Layout.Add( CompactAction(
 			"Curves",
 			"show_chart",
 			() => _controller.Mutate(
 				"Curve editor visibility",
 				d => d.Workspace.CurveEditorVisible = !d.Workspace.CurveEditorVisible ),
-			toolbar ) );
-		toolbar.Layout.AddStretchCell();
-		_timeLabel = WeaponAnimatorTheme.Label( "", toolbar );
-		toolbar.Layout.Add( _timeLabel );
-		Layout.Add( toolbar );
+			left ) );
 
-		_timeline = new TimelineCanvas( controller, this );
+		var player = _toolbar.CenterSection;
+		player.Layout.Spacing = 3;
+		player.Layout.Add( PlayerButton( "first_page", "Jump to first frame", _controller.JumpToFirstFrame, player ) );
+		player.Layout.Add( PlayerButton( "skip_previous", "Previous frame", () => _controller.StepTimelineFrame( -1 ), player ) );
+		_playButton = PlayerButton( "play_arrow", "Play", _controller.TogglePlayback, player );
+		player.Layout.Add( _playButton );
+		player.Layout.Add( PlayerButton( "skip_next", "Next frame", () => _controller.StepTimelineFrame( 1 ), player ) );
+		player.Layout.Add( PlayerButton( "last_page", "Jump to last frame", _controller.JumpToLastFrame, player ) );
+
+		var right = _toolbar.RightSection;
+		right.Layout.AddStretchCell();
+		_timeLabel = WeaponAnimatorTheme.Label( "", right );
+		right.Layout.Add( _timeLabel );
+		_toolbar.FitSections();
+		Layout.Add( _toolbar );
+
+		_timeline = new TimelineEditorCanvas( controller, this );
 		Layout.Add( _timeline, 1 );
 		_controller.DocumentChanged += Refresh;
 		_controller.TimelineChanged += Refresh;
+		_controller.PlaybackChanged += Refresh;
 		Refresh();
 	}
 
@@ -1191,6 +1196,7 @@ public sealed class AnimationTimelinePanel : Widget
 	{
 		_controller.DocumentChanged -= Refresh;
 		_controller.TimelineChanged -= Refresh;
+		_controller.PlaybackChanged -= Refresh;
 		base.OnDestroyed();
 	}
 
@@ -1250,13 +1256,126 @@ public sealed class AnimationTimelinePanel : Widget
 			_timeLabel.Text = "No clip";
 		else
 		{
-			var frame = (int)MathF.Round(
-				_controller.Document.Workspace.TimelineTime * clip.SampleRate );
-			var total = (int)MathF.Round( clip.Duration * clip.SampleRate );
+			var frame = TimelineInteraction.TimeToFrame(
+				_controller.Document.Workspace.TimelineTime,
+				clip.SampleRate );
+			var total = TimelineInteraction.LastFrame( clip );
 			_timeLabel.Text =
 				$"{_controller.Document.Workspace.TimelineTime:0.000}s · {frame:00} / {total:00}";
 		}
+		_playButton.Icon = _controller.IsPlaying ? "pause" : "play_arrow";
+		_playButton.ToolTip = _controller.IsPlaying ? "Pause" : "Play";
+		_toolbar.FitSections();
 		_timeline.Update();
+	}
+
+	private static WeaponAnimatorButton CompactAction(
+		string text,
+		string icon,
+		Action clicked,
+		Widget parent,
+		bool primary = false )
+	{
+		var button = (WeaponAnimatorButton)WeaponAnimatorTheme.Button(
+			text,
+			icon,
+			clicked,
+			parent,
+			primary );
+		button.FixedHeight = 26;
+		button.FitToContent( true );
+		return button;
+	}
+
+	private static WeaponAnimatorButton PlayerButton(
+		string icon,
+		string tooltip,
+		Action clicked,
+		Widget parent )
+	{
+		var button = new WeaponAnimatorButton( "", icon, parent )
+		{
+			Clicked = clicked,
+			FixedWidth = 28,
+			FixedHeight = 26,
+			Tint = WeaponAnimatorTheme.SurfaceRaised,
+			ToolTip = tooltip
+		};
+		return button;
+	}
+}
+
+internal sealed class TimelineControlToolbar : Widget
+{
+	public Widget LeftSection { get; }
+	public Widget CenterSection { get; }
+	public Widget RightSection { get; }
+
+	public TimelineControlToolbar( Widget? parent = null ) : base( parent )
+	{
+		FixedHeight = 34;
+		SetStyles( "background-color: rgb(24,27,30); border: none;" );
+		Layout = Layout.Row();
+		Layout.Margin = new Sandbox.UI.Margin( 7, 4, 7, 4 );
+		Layout.Spacing = 0;
+
+		LeftSection = Section( this );
+		CenterSection = Section( this );
+		RightSection = Section( this );
+		Layout.Add( LeftSection );
+		Layout.AddStretchCell();
+		Layout.Add( RightSection );
+		CenterSection.Raise();
+	}
+
+	public void FitSections()
+	{
+		LeftSection.FixedWidth = SectionWidth( LeftSection );
+		CenterSection.FixedWidth = SectionWidth( CenterSection );
+		PositionCenter();
+	}
+
+	protected override void OnResize()
+	{
+		base.OnResize();
+		PositionCenter();
+	}
+
+	private void PositionCenter()
+	{
+		CenterSection.Position = new Vector2(
+			CenteredLeft( Width, CenterSection.Width ),
+			MathF.Round( (Height - CenterSection.Height) * 0.5f ) );
+		CenterSection.Raise();
+	}
+
+	internal static float CenteredLeft( float toolbarWidth, float sectionWidth ) =>
+		MathF.Round( (toolbarWidth - sectionWidth) * 0.5f );
+
+	private static float SectionWidth( Widget section )
+	{
+		var children = section.Children.ToArray();
+		if ( children.Length == 0 )
+			return 0;
+		return children.Sum( x => x is WeaponAnimatorButton button
+			? string.IsNullOrWhiteSpace( button.Text )
+				? 28
+				: MathF.Ceiling( button.PreferredWidth )
+			: MathF.Max( x.MinimumWidth, 0 ) )
+			+ MathF.Max( children.Length - 1, 0 ) * section.Layout.Spacing;
+	}
+
+	private static Widget Section( Widget parent )
+	{
+		var section = new Widget( parent )
+		{
+			Layout = Layout.Row(),
+			FixedHeight = 26
+		};
+		section.SetStyles( "background-color: transparent; border: none;" );
+		section.Layout.Margin = 0;
+		section.Layout.Spacing = 4;
+		return section;
 	}
 }
 
@@ -1393,25 +1512,13 @@ internal sealed class TimelineCanvas : Widget
 			{
 				if ( !starts.TryGetValue( key.Id, out var start ) )
 					continue;
-				key.Time = Math.Clamp(
-					WeaponAnimationMath.SnapTime(
-						start + delta,
-						clip.SampleRate,
-						clip.AllowSubframeKeys ),
-					0,
-					clip.Duration );
+				key.Time = TimelineInteraction.SnapTime( clip, start + delta );
 			}
 			foreach ( var key in clip.VisibilityTracks.SelectMany( x => x.Keys ) )
 			{
 				if ( !starts.TryGetValue( key.Id, out var start ) )
 					continue;
-				key.Time = Math.Clamp(
-					WeaponAnimationMath.SnapTime(
-						start + delta,
-						clip.SampleRate,
-						clip.AllowSubframeKeys ),
-					0,
-					clip.Duration );
+				key.Time = TimelineInteraction.SnapTime( clip, start + delta );
 			}
 			foreach ( var track in clip.Tracks )
 				track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
