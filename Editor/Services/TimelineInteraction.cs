@@ -13,6 +13,12 @@ internal readonly record struct TimelineFrameRange( int StartFrame, int EndFrame
 
 internal readonly record struct TimelineTickSpacing( int MinorFrames, int MajorFrames );
 
+internal readonly record struct TimelineMarqueeBounds(
+	float Left,
+	float Top,
+	float Right,
+	float Bottom );
+
 internal static class TimelineInteraction
 {
 	public const int MinimumVisibleFrameIntervals = 2;
@@ -151,6 +157,26 @@ internal static class TimelineInteraction
 
 		result.UnionWith( hits );
 		return result;
+	}
+
+	public static TimelineMarqueeBounds ProjectMarquee(
+		float startX,
+		float startContentY,
+		float currentX,
+		float currentContentY,
+		float verticalScroll,
+		float minimumX,
+		float maximumX )
+	{
+		var left = MathF.Max( MathF.Min( startX, currentX ), minimumX );
+		var right = MathF.Min( MathF.Max( startX, currentX ), maximumX );
+		var top = MathF.Min( startContentY, currentContentY ) - verticalScroll;
+		var bottom = MathF.Max( startContentY, currentContentY ) - verticalScroll;
+		return new TimelineMarqueeBounds(
+			left,
+			top,
+			MathF.Max( right, left ),
+			MathF.Max( bottom, top ) );
 	}
 
 	public static int TrackRowCount(

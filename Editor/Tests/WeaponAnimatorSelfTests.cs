@@ -1328,6 +1328,32 @@ public static class WeaponAnimatorSelfTests
 			report,
 			toggled.SetEquals( [first, third] ),
 			"Ctrl-marquee must toggle every intersected key." );
+		var scrolledMarquee = TimelineInteraction.ProjectMarquee(
+			startX: 220,
+			startContentY: 400,
+			currentX: 520,
+			currentContentY: 290,
+			verticalScroll: 40,
+			minimumX: 180,
+			maximumX: 500 );
+		Near(
+			report,
+			360,
+			scrolledMarquee.Bottom,
+			0.0001f,
+			"A marquee start must remain anchored to its original track while scrolling." );
+		Near(
+			report,
+			250,
+			scrolledMarquee.Top,
+			0.0001f,
+			"A scrolling marquee endpoint must follow the newly revealed content." );
+		Near(
+			report,
+			500,
+			scrolledMarquee.Right,
+			0.0001f,
+			"A marquee must remain clipped to the graph's right edge." );
 		Equal(
 			report,
 			-2,

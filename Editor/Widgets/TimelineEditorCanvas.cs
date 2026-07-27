@@ -425,6 +425,8 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 	private TimelineGridDragMode _dragMode;
 	private Vector2 _pressPosition;
 	private Vector2 _dragPosition;
+	private float _marqueePressContentY;
+	private float _marqueeDragContentY;
 	private bool _dragStarted;
 	private bool _additiveSelection;
 	private bool _toggleSelection;
@@ -511,6 +513,8 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		}
 
 		_pressPosition = _dragPosition = e.LocalPosition;
+		_marqueePressContentY = _marqueeDragContentY =
+			e.LocalPosition.y + VerticalScrollbar.Value;
 		_dragStarted = false;
 		_additiveSelection = e.HasShift;
 		_toggleSelection = e.HasCtrl;
@@ -575,6 +579,8 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		}
 
 		_dragPosition = e.LocalPosition;
+		if ( _dragMode == TimelineGridDragMode.Marquee )
+			_marqueeDragContentY = e.LocalPosition.y + VerticalScrollbar.Value;
 		_dragStarted |= (_dragPosition - _pressPosition).Length >= DragThreshold;
 		switch ( _dragMode )
 		{
@@ -617,7 +623,11 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 
 		var clip = _timeline.Clip;
 		if ( _dragMode == TimelineGridDragMode.Marquee && clip is not null )
+		{
+			_dragPosition = e.LocalPosition;
+			_marqueeDragContentY = e.LocalPosition.y + VerticalScrollbar.Value;
 			ApplyMarqueeSelection( clip );
+		}
 		else if ( _dragMode == TimelineGridDragMode.Keys )
 		{
 			if ( _dragStarted )
@@ -653,6 +663,11 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 			|| _timeline.Clip is not { } clip
 			|| _timeline.Controller.Document.Workspace.CurveEditorVisible )
 			return;
+		if ( _dragMode == TimelineGridDragMode.Marquee )
+		{
+			_marqueeDragContentY = _dragPosition.y + VerticalScrollbar.Value;
+			ApplyMarqueeSelection( clip );
+		}
 		_timeline.Controller.SetTimelineVerticalScroll(
 			clip,
 			VerticalScrollbar.Value );
@@ -1000,18 +1015,19 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 
 	private Rect SelectionRect()
 	{
-		var left = MathF.Max(
-			MathF.Min( _pressPosition.x, _dragPosition.x ),
-			TimelineEditorCanvas.GraphStartX );
-		var right = MathF.Min(
-			MathF.Max( _pressPosition.x, _dragPosition.x ),
+		var bounds = TimelineInteraction.ProjectMarquee(
+			_pressPosition.x,
+			_marqueePressContentY,
+			_dragPosition.x,
+			_marqueeDragContentY,
+			VerticalScrollbar.Value,
+			TimelineEditorCanvas.GraphStartX,
 			_timeline.BodyRight( Width ) );
-		var top = MathF.Min( _pressPosition.y, _dragPosition.y );
 		return new Rect(
-			left,
-			top,
-			MathF.Max( right - left, 0 ),
-			MathF.Abs( _dragPosition.y - _pressPosition.y ) );
+			bounds.Left,
+			bounds.Top,
+			bounds.Right - bounds.Left,
+			bounds.Bottom - bounds.Top );
 	}
 
 	private float RowY( int row ) =>
