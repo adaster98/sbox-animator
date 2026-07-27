@@ -34,6 +34,10 @@ hashes, onion skins, or prefab playback.
 Viewport guides are disabled for new projects. Grid opacity and line weight can be previewed
 live from **Edit → Preferences**; both settings affect the minor, major, and colored origin
 axes without affecting generated assets.
+The same Preferences window controls the cyan viewport edge light. It can be disabled or
+adjusted from 0–12 brightness, with a restrained default of 4. Full Bright disables this
+light automatically and gives the Facepunch arms a temporary neutral preview material so
+their skin remains visible; neither setting changes generated materials.
 
 Schema-v2 projects are backed up before their first schema-v3 save. Weapon calibration,
 anchors, clips, tags, and compatible weapon tracks are preserved, while imported arm

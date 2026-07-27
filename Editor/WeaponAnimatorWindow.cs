@@ -1187,7 +1187,7 @@ internal sealed class WeaponAnimatorPreferencesWindow : Window
 		DeleteOnClose = true;
 		WindowTitle = "Weapon Animator Preferences";
 		Title = WindowTitle;
-		Size = new Vector2( 420, 400 );
+		Size = new Vector2( 420, 520 );
 		var root = new Widget( this );
 		root.SetStyles( "background-color: rgb(13,15,17);" );
 		root.Layout = Layout.Column();
@@ -1237,6 +1237,30 @@ internal sealed class WeaponAnimatorPreferencesWindow : Window
 			value => controller.UpdateWorkspacePreference(
 				"Grid line weight",
 				workspace => workspace.GridLineThickness = value ) ) );
+		root.Layout.Add( WeaponAnimatorTheme.SectionLabel(
+			"VIEWPORT LIGHTING",
+			root,
+			topMargin: true ) );
+		root.Layout.Add( Toggle(
+			"Cyan edge light",
+			controller.Document.Workspace.RimLightEnabled,
+			value => controller.UpdateWorkspacePreference(
+				"Cyan edge light",
+				workspace => workspace.RimLightEnabled = value ) ) );
+		root.Layout.Add( Number(
+			"Cyan edge brightness",
+			controller.Document.Workspace.RimLightIntensity,
+			0,
+			12,
+			value => controller.UpdateWorkspacePreference(
+				"Cyan edge brightness",
+				workspace => workspace.RimLightIntensity = value ) ) );
+		var lightingNote = WeaponAnimatorTheme.Label(
+			"The edge light is disabled automatically in Full Bright.",
+			root,
+			true );
+		lightingNote.WordWrap = true;
+		root.Layout.Add( lightingNote );
 		root.Layout.AddStretchCell();
 		root.Layout.Add( WeaponAnimatorTheme.Button( "Close", "close", Close, root, true ) );
 		Canvas = root;

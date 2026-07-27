@@ -31,6 +31,49 @@ internal readonly record struct GridVisualStyle(
 	}
 }
 
+internal readonly record struct ViewportRimLightStyle(
+	bool Enabled,
+	float Intensity,
+	Color Color )
+{
+	public static ViewportRimLightStyle Resolve(
+		bool enabled,
+		float intensity,
+		bool fullBright )
+	{
+		var safeIntensity = WeaponAnimationMath.IsFinite( intensity )
+			? Math.Clamp( intensity, 0, 12 )
+			: 4.0f;
+		return new ViewportRimLightStyle(
+			enabled && !fullBright && safeIntensity > 0.001f,
+			safeIntensity,
+			WeaponAnimatorTheme.Cyan * safeIntensity );
+	}
+}
+
+internal readonly record struct ArmPreviewVisualStyle(
+	bool UseFlatMaterial,
+	Color Tint )
+{
+	public static ArmPreviewVisualStyle Resolve(
+		WeaponAnimatorStage stage,
+		bool fullBright )
+	{
+		if ( fullBright )
+		{
+			return new ArmPreviewVisualStyle(
+				true,
+				new Color( 0.78f, 0.55f, 0.43f ) );
+		}
+
+		return stage == WeaponAnimatorStage.Animate
+			? new ArmPreviewVisualStyle( false, Color.White )
+			: new ArmPreviewVisualStyle(
+				false,
+				new Color( 0.42f, 0.84f, 0.92f, 0.42f ) );
+	}
+}
+
 public enum WeaponAnimatorTransformMode
 {
 	Move,
@@ -141,6 +184,8 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		new( 260, Width < 620 ? 46 : 10, 104, 28 );
 	private readonly WeaponAnimatorController _controller;
 	private readonly CameraComponent _camera;
+	private readonly PointLight _rimLight;
+	private readonly Material _flatArmsMaterial;
 	private readonly WeaponAnimatorButton _moveModeButton;
 	private readonly WeaponAnimatorButton _rotateModeButton;
 	private readonly WeaponAnimatorButton _scaleModeButton;
@@ -215,13 +260,13 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			key.SkyColor = new Color( 0.18f, 0.22f, 0.27f );
 			key.Enabled = true;
 
-			var rim = new GameObject( true, "rim_light" )
+			_rimLight = new GameObject( true, "rim_light" )
 				.GetOrAddComponent<PointLight>( false );
-			rim.WorldPosition = new Vector3( -32, 38, 28 );
-			rim.LightColor = WeaponAnimatorTheme.Cyan * 12;
-			rim.Radius = 160;
-			rim.Enabled = true;
+			_rimLight.WorldPosition = new Vector3( -32, 38, 28 );
+			_rimLight.Radius = 160;
 		}
+		_flatArmsMaterial = Material.Load( "materials/dev/primary_white.vmat" );
+		ApplyViewportRenderStyle();
 
 		_moveModeButton = AddTransformModeButton(
 			"open_with",
@@ -650,6 +695,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		AdvancePlayback();
 		UpdateFreeLookMovement();
 		UpdateCamera();
+		ApplyViewportRenderStyle();
 
 		DrawWorkspaceGrid();
 		if ( _controller.Document.ActiveStage == WeaponAnimatorStage.Calibrate )
@@ -855,6 +901,27 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		_camera.WorldPosition = focus - rotation.Forward * document.Workspace.CameraDistance;
 		_camera.WorldRotation = Rotation.LookAt( focus - _camera.WorldPosition, Vector3.Up );
 		_camera.FieldOfView = 48;
+	}
+
+	private void ApplyViewportRenderStyle()
+	{
+		var document = _controller.Document;
+		var rim = ViewportRimLightStyle.Resolve(
+			document.Workspace.RimLightEnabled,
+			document.Workspace.RimLightIntensity,
+			document.Workspace.FullBrightViewport );
+		_rimLight.Enabled = rim.Enabled;
+		_rimLight.LightColor = rim.Color;
+
+		if ( !_armsRenderer.IsValid() )
+			return;
+		var arms = ArmPreviewVisualStyle.Resolve(
+			document.ActiveStage,
+			document.Workspace.FullBrightViewport );
+		_armsRenderer!.MaterialOverride = arms.UseFlatMaterial
+			? _flatArmsMaterial
+			: null;
+		_armsRenderer.Tint = arms.Tint;
 	}
 
 	private void UpdateFreeLookMovement()
@@ -1172,8 +1239,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 		var compared = 0;
 		var mismatches = 0;
+		var hiddenVisibilityBones = HiddenVisibilityBonesAtPlayhead();
 		foreach ( var definition in _controller.Document.Rig.RetainedBones() )
 		{
+			if ( hiddenVisibilityBones.Contains( definition.Name ) )
+				continue;
 			var sourceBone = _sourceRenderer!.Model.Bones.GetBone( definition.Name );
 			if ( sourceBone is null
 				|| !WeaponPoseProjection.TryGetSourceWorldOverride(
@@ -1220,6 +1290,39 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				+ $"poseRootWorld={rootWorld}, poseRootLocal={rootLocal}, "
 				+ $"sourceRenderer={_sourceRenderer!.WorldTransform}." );
 		}
+	}
+
+	private HashSet<string> HiddenVisibilityBonesAtPlayhead()
+	{
+		var document = _controller.Document;
+		var clip = document.GetSelectedClip();
+		var hidden = document.Rig.VisibilityParts
+			.Where( x =>
+				x.RenderMode == VisibilityRenderMode.BoneBranch
+				&& !WeaponVisibilityEvaluator.Evaluate(
+					x,
+					clip,
+					document.Workspace.TimelineTime ) )
+			.Select( x => x.BoneName )
+			.Where( x => !string.IsNullOrWhiteSpace( x ) )
+			.ToHashSet( StringComparer.OrdinalIgnoreCase );
+		if ( hidden.Count == 0 )
+			return hidden;
+
+		var changed = true;
+		while ( changed )
+		{
+			changed = false;
+			foreach ( var bone in document.Rig.RetainedBones() )
+			{
+				if ( hidden.Contains( bone.Name )
+					|| !hidden.Contains( bone.ParentName ) )
+					continue;
+				hidden.Add( bone.Name );
+				changed = true;
+			}
+		}
+		return hidden;
 	}
 
 	private bool RepairLegacyIdleIfNeeded()

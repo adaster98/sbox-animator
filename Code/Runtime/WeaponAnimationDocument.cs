@@ -570,6 +570,8 @@ public sealed class WorkspaceState
 	public bool ShowOnionSkins { get; set; }
 	public float GridOpacity { get; set; } = 0.10f;
 	public float GridLineThickness { get; set; } = 0.65f;
+	public bool RimLightEnabled { get; set; } = true;
+	public float RimLightIntensity { get; set; } = 4.0f;
 	public bool AutoKey { get; set; } = true;
 	public bool LocalGizmos { get; set; } = true;
 	public bool SnapPosition { get; set; } = true;

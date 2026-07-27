@@ -94,6 +94,16 @@ public static class WeaponAnimatorSelfTests
 			report,
 			!document.Workspace.FullBrightViewport,
 			"New projects must open with lit viewport rendering." );
+		Check(
+			report,
+			document.Workspace.RimLightEnabled,
+			"The cyan viewport edge light must remain available by default." );
+		Near(
+			report,
+			4.0f,
+			document.Workspace.RimLightIntensity,
+			0.0001f,
+			"The edge light default must be restrained rather than the old over-bright value." );
 		Near(
 			report,
 			1.0f,
@@ -191,6 +201,45 @@ public static class WeaponAnimatorSelfTests
 			faintStyle.AxisOpacity < gridStyle.AxisOpacity
 				&& faintStyle.AxisWidth < gridStyle.AxisWidth,
 			"Lower opacity and weight must visibly affect both primary and secondary grid lines." );
+		var rimStyle = ViewportRimLightStyle.Resolve(
+			document.Workspace.RimLightEnabled,
+			document.Workspace.RimLightIntensity,
+			false );
+		Check(
+			report,
+			rimStyle.Enabled,
+			"The edge-light preference must enable the cyan point light in lit mode." );
+		Near(
+			report,
+			4.0f,
+			rimStyle.Intensity,
+			0.0001f,
+			"The viewport must apply the persisted edge-light brightness." );
+		Check(
+			report,
+			!ViewportRimLightStyle.Resolve( true, 4, true ).Enabled
+				&& !ViewportRimLightStyle.Resolve( false, 4, false ).Enabled,
+			"Full Bright and the explicit toggle must both disable the edge light." );
+		Near(
+			report,
+			12,
+			ViewportRimLightStyle.Resolve( true, 99, false ).Intensity,
+			0.0001f,
+			"Edge-light brightness must remain inside its supported range." );
+		var fullBrightArms = ArmPreviewVisualStyle.Resolve(
+			WeaponAnimatorStage.Animate,
+			true );
+		Check(
+			report,
+			fullBrightArms.UseFlatMaterial
+				&& MathF.Max(
+					fullBrightArms.Tint.r,
+					MathF.Max( fullBrightArms.Tint.g, fullBrightArms.Tint.b ) ) > 0.1f,
+			"Full Bright must use a visible neutral arms material instead of rendering skin black." );
+		Check(
+			report,
+			!ArmPreviewVisualStyle.Resolve( WeaponAnimatorStage.Animate, false ).UseFlatMaterial,
+			"Lit animation preview must preserve the production arms materials." );
 
 		var first = WeaponAnimationClip.Create( WeaponClipRole.Custom );
 		var second = WeaponAnimationClip.Create( WeaponClipRole.Custom );
