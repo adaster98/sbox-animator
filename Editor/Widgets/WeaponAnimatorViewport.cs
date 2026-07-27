@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Editor;
 using Sandbox;
@@ -37,18 +38,115 @@ public enum WeaponAnimatorTransformMode
 	Scale
 }
 
+internal sealed class RotationSnapStepWidget : Widget
+{
+	private readonly LineEdit _edit;
+	private readonly Func<float> _getValue;
+	private readonly Action<float> _setValue;
+
+	public RotationSnapStepWidget(
+		Func<float> getValue,
+		Action<float> setValue,
+		Widget parent ) : base( parent )
+	{
+		_getValue = getValue;
+		_setValue = setValue;
+		FixedWidth = 55;
+		FixedHeight = 28;
+		ToolTip = "Rotation snap angle";
+		SetStyles(
+			"background-color: rgb(20,23,26);" +
+			"border: 1px solid rgba(255,255,255,0.09);" +
+			"border-radius: 3px;" );
+		Layout = Layout.Row();
+		Layout.Margin = 0;
+		Layout.Spacing = 0;
+
+		_edit = new LineEdit( this )
+		{
+			FixedHeight = 26,
+			ToolTip = ToolTip
+		};
+		_edit.SetStyles(
+			"background-color: transparent; border: none;" +
+			"color: rgb(224,229,234); font-size: 11px;" +
+			"text-align: right; padding: 0 1px 0 2px;" );
+		_edit.TextEdited += ApplyText;
+		_edit.EditingFinished += Refresh;
+		Layout.Add( _edit, 1 );
+
+		var suffix = WeaponAnimatorTheme.Label( "°", this );
+		suffix.FixedWidth = 9;
+		suffix.Alignment = TextFlag.Center;
+		Layout.Add( suffix );
+
+		var buttons = Layout.AddColumn();
+		buttons.Add( new IconButton( "keyboard_arrow_up", () => Step( 1 ) )
+		{
+			Background = Color.Transparent,
+			FixedWidth = 16,
+			FixedHeight = 13,
+			IconSize = 12,
+			ToolTip = "Increase rotation snap angle"
+		} );
+		buttons.Add( new IconButton( "keyboard_arrow_down", () => Step( -1 ) )
+		{
+			Background = Color.Transparent,
+			FixedWidth = 16,
+			FixedHeight = 13,
+			IconSize = 12,
+			ToolTip = "Decrease rotation snap angle"
+		} );
+		Refresh();
+	}
+
+	public void Refresh()
+	{
+		if ( _edit.IsFocused )
+			return;
+
+		_edit.Text = _getValue().ToString( "0.##", CultureInfo.InvariantCulture );
+		_edit.CursorPosition = 0;
+		Update();
+	}
+
+	private void ApplyText( string text )
+	{
+		if ( float.TryParse(
+			text,
+			NumberStyles.Float,
+			CultureInfo.InvariantCulture,
+			out var value )
+			&& WeaponAnimationMath.IsFinite( value ) )
+			_setValue( value );
+	}
+
+	private void Step( int direction )
+	{
+		_edit.Blur();
+		_setValue( WeaponAnimatorViewport.AdjustRotationSnapAngle(
+			_getValue(),
+			direction ) );
+		Refresh();
+	}
+}
+
 public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 {
 	private const int LegacyIdleRepairVersion = 3;
 	private const float ScaleGizmoSensitivity = 0.005f;
-	private static readonly Rect TransformReadoutRect =
-		new( 150, 10, 104, 28 );
+	private static readonly float[] RotationSnapSteps =
+		[0.25f, 0.5f, 1, 5, 15, 30, 45, 90, 180];
+	private Rect TransformReadoutRect =>
+		new( 260, Width < 620 ? 46 : 10, 104, 28 );
 	private readonly WeaponAnimatorController _controller;
 	private readonly CameraComponent _camera;
 	private readonly WeaponAnimatorButton _moveModeButton;
 	private readonly WeaponAnimatorButton _rotateModeButton;
 	private readonly WeaponAnimatorButton _scaleModeButton;
 	private readonly WeaponAnimatorButton _spaceButton;
+	private readonly WeaponAnimatorButton _rotationSnapButton;
+	private readonly RotationSnapStepWidget _rotationSnapStep;
 	private readonly WeaponAnimatorButton _orbitCameraButton;
 	private readonly WeaponAnimatorButton _freeLookCameraButton;
 	private readonly WeaponAnimatorButton _lightingButton;
@@ -149,6 +247,27 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			FixedHeight = 28
 		};
 		_spaceButton.Raise();
+		_rotationSnapButton = new WeaponAnimatorButton(
+			"",
+			"rotate_90_degrees_cw",
+			this )
+		{
+			IsToggle = true,
+			Clicked = ToggleRotationSnap,
+			Position = new Vector2( 166, 10 ),
+			FixedWidth = 28,
+			FixedHeight = 28,
+			ToolTip = "Toggle rotation snapping"
+		};
+		_rotationSnapButton.Raise();
+		_rotationSnapStep = new RotationSnapStepWidget(
+			() => _controller.Document.Workspace.RotationSnapDegrees,
+			SetRotationSnapDegrees,
+			this )
+		{
+			Position = new Vector2( 197, 10 )
+		};
+		_rotationSnapStep.Raise();
 		_orbitCameraButton = AddViewportActionButton(
 			"360",
 			"Orbit camera",
@@ -329,9 +448,31 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		RefreshTransformOverlay();
 	}
 
+	private void ToggleRotationSnap()
+	{
+		_controller.UpdateWorkspacePreference(
+			"Rotation snapping",
+			state => state.SnapRotation = !state.SnapRotation );
+		RefreshTransformOverlay();
+		Update();
+	}
+
+	private void SetRotationSnapDegrees( float value )
+	{
+		if ( !WeaponAnimationMath.IsFinite( value ) )
+			return;
+
+		_controller.UpdateWorkspacePreference(
+			"Rotation snap angle",
+			state => state.RotationSnapDegrees = Math.Clamp( value, 0.25f, 180.0f ) );
+		RefreshTransformOverlay();
+		Update();
+	}
+
 	private void RefreshTransformOverlay()
 	{
-		var local = _controller.Document.Workspace.LocalGizmos;
+		var workspace = _controller.Document.Workspace;
+		var local = workspace.LocalGizmos;
 		RefreshTransformModeButton(
 			_moveModeButton,
 			TransformMode == WeaponAnimatorTransformMode.Move );
@@ -348,6 +489,15 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		_spaceButton.ToolTip = local
 			? "Local space — click for World"
 			: "World space — click for Local";
+		RefreshTransformModeButton(
+			_rotationSnapButton,
+			workspace.SnapRotation );
+		_rotationSnapStep.Refresh();
+		GizmoInstance.Settings.SnapToAngles = workspace.SnapRotation;
+		GizmoInstance.Settings.AngleSpacing =
+			WeaponAnimationMath.IsFinite( workspace.RotationSnapDegrees )
+				? Math.Clamp( workspace.RotationSnapDegrees, 0.25f, 180.0f )
+				: 15.0f;
 		_transformModeText =
 			$"{TransformModeName( TransformMode ).ToUpperInvariant()} · {(local ? "LOCAL" : "WORLD")}";
 	}
@@ -750,6 +900,29 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			currentSpeed + adjustment * Math.Sign( direction ),
 			0.25f,
 			100.0f );
+	}
+
+	internal static float AdjustRotationSnapAngle( float currentAngle, int direction )
+	{
+		if ( !WeaponAnimationMath.IsFinite( currentAngle ) )
+			currentAngle = 15;
+
+		var nearest = 0;
+		var nearestDistance = float.MaxValue;
+		for ( var index = 0; index < RotationSnapSteps.Length; index++ )
+		{
+			var distance = MathF.Abs( currentAngle - RotationSnapSteps[index] );
+			if ( distance >= nearestDistance )
+				continue;
+			nearest = index;
+			nearestDistance = distance;
+		}
+
+		var target = Math.Clamp(
+			nearest + Math.Sign( direction ),
+			0,
+			RotationSnapSteps.Length - 1 );
+		return RotationSnapSteps[target];
 	}
 
 	private void DrawCalibration()
@@ -1652,6 +1825,9 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			new Rect( 109, 15, 1, 18 ),
 			Color.White.WithAlpha( 0.14f ) );
 		Gizmo.Draw.ScreenRect(
+			new Rect( 157, 15, 1, 18 ),
+			Color.White.WithAlpha( 0.14f ) );
+		Gizmo.Draw.ScreenRect(
 			new Rect( MathF.Max( Width - 47, 66 ), 15, 1, 18 ),
 			Color.White.WithAlpha( 0.14f ) );
 		Gizmo.Draw.ScreenRect(
@@ -1685,7 +1861,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			: 1.0f - Math.Clamp( (elapsed - 0.9f) / 0.9f, 0, 1 );
 		var rect = new Rect(
 			MathF.Max( (Width - 150) * 0.5f, 0 ),
-			Width >= 720 ? 10 : 46,
+			Width >= 720 ? 10 : Width >= 620 ? 46 : 82,
 			150,
 			28 );
 		Gizmo.Draw.ScreenRect(

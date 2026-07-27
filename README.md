@@ -20,6 +20,8 @@ Only manifest-owned outputs are replaced during regeneration.
 The viewport toolbar uses the standard **W** Move, **E** Rotate, and **R** Scale bindings.
 Its globe button switches the shared Local/World coordinate space; the selected-control
 transform labels follow that setting automatically.
+The adjacent angle-snap control enables or disables rotation snapping and edits its step
+from 0.25° through 180°; its arrow buttons move through the standard editor angle presets.
 The top-right camera controls switch between Orbit and Free Look and toggle Lit/Full Bright
 rendering. In Free Look, hold the right mouse button to look, use **WASD** to move, hold
 **Shift** to move faster, and scroll to adjust movement speed. A brief top-center readout

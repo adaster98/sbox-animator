@@ -1187,7 +1187,7 @@ internal sealed class WeaponAnimatorPreferencesWindow : Window
 		DeleteOnClose = true;
 		WindowTitle = "Weapon Animator Preferences";
 		Title = WindowTitle;
-		Size = new Vector2( 420, 350 );
+		Size = new Vector2( 420, 400 );
 		var root = new Widget( this );
 		root.SetStyles( "background-color: rgb(13,15,17);" );
 		root.Layout = Layout.Column();
@@ -1209,6 +1209,14 @@ internal sealed class WeaponAnimatorPreferencesWindow : Window
 			"Snap rotation",
 			controller.Document.Workspace.SnapRotation,
 			value => controller.Mutate( "Rotation snapping", d => d.Workspace.SnapRotation = value ) ) );
+		root.Layout.Add( Number(
+			"Rotation snap angle",
+			controller.Document.Workspace.RotationSnapDegrees,
+			0.25f,
+			180,
+			value => controller.UpdateWorkspacePreference(
+				"Rotation snap angle",
+				workspace => workspace.RotationSnapDegrees = value ) ) );
 		root.Layout.Add( WeaponAnimatorTheme.SectionLabel(
 			"VIEWPORT GRID",
 			root,

@@ -527,6 +527,7 @@ public sealed class WorkspaceState
 	public bool LocalGizmos { get; set; } = true;
 	public bool SnapPosition { get; set; } = true;
 	public bool SnapRotation { get; set; } = true;
+	public float RotationSnapDegrees { get; set; } = 15.0f;
 	public bool CurveEditorVisible { get; set; }
 	public List<WorkingPoseOverride> WorkingPoseOverrides { get; set; } = [];
 	public Vector3 CameraFocus { get; set; }

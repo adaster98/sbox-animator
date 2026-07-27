@@ -99,6 +99,40 @@ public static class WeaponAnimatorSelfTests
 			document.Workspace.CameraMoveSpeed,
 			0.0001f,
 			"The free-look camera must start at normal movement speed." );
+		Check(
+			report,
+			document.Workspace.SnapRotation,
+			"Rotation snapping must be enabled in new projects." );
+		Near(
+			report,
+			15.0f,
+			document.Workspace.RotationSnapDegrees,
+			0.0001f,
+			"Rotation snapping must start at the familiar 15-degree step." );
+		Near(
+			report,
+			30.0f,
+			WeaponAnimatorViewport.AdjustRotationSnapAngle( 15.0f, 1 ),
+			0.0001f,
+			"The snap-angle stepper must advance through the standard angle presets." );
+		Near(
+			report,
+			5.0f,
+			WeaponAnimatorViewport.AdjustRotationSnapAngle( 15.0f, -1 ),
+			0.0001f,
+			"The snap-angle stepper must move backward through the standard angle presets." );
+		Near(
+			report,
+			0.25f,
+			WeaponAnimatorViewport.AdjustRotationSnapAngle( 0.25f, -1 ),
+			0.0001f,
+			"The snap-angle stepper must retain its lower bound." );
+		Near(
+			report,
+			180.0f,
+			WeaponAnimatorViewport.AdjustRotationSnapAngle( 180.0f, 1 ),
+			0.0001f,
+			"The snap-angle stepper must retain its upper bound." );
 		Near(
 			report,
 			1.25f,
