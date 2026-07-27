@@ -1166,7 +1166,10 @@ public sealed class AnimationTimelinePanel : Widget
 		left.Layout.Add( CompactAction( "Copy", "content_copy", _controller.CopySelectedKeys, left ) );
 		left.Layout.Add( CompactAction( "Paste", "content_paste", _controller.PasteKeys, left ) );
 		left.Layout.Add( CompactAction( "Delete", "delete", _controller.DeleteSelectedKeys, left ) );
-		left.Layout.Add( CompactAction( "Mirror", "flip", _controller.MirrorSelectedKeys, left ) );
+		var reverse = CompactAction( "Reverse", "swap_horiz", _controller.ReverseKeys, left );
+		reverse.ToolTip =
+			"Reverse selected keys within their time range. With no selection, reverse the whole clip.";
+		left.Layout.Add( reverse );
 		_curvesButton = CompactAction(
 			"Curves",
 			"show_chart",

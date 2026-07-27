@@ -47,6 +47,7 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "frame snapping", TestFrameSnapping );
 		Run( report, "timeline navigation", TestTimelineNavigation );
 		Run( report, "timeline selection and movement", TestTimelineSelectionAndMovement );
+		Run( report, "timeline key reversal", TestTimelineKeyReversal );
 		Run( report, "timeline playback", TestTimelinePlayback );
 		Run( report, "two-bone IK", TestTwoBoneIk );
 		Run( report, "IK descendant propagation", TestIkDescendantPropagation );
@@ -1127,13 +1128,19 @@ public static class WeaponAnimatorSelfTests
 		var timeline = new AnimationTimelinePanel( controller );
 		var timelineActions = WidgetTree( timeline )
 			.OfType<WeaponAnimatorButton>()
-			.Where( x => x.Text is "Add key" or "Copy" or "Paste" or "Mirror" or "Curves" )
+			.Where( x => x.Text is "Add key" or "Copy" or "Paste" or "Reverse" or "Curves" )
 			.ToArray();
 		Equal(
 			report,
 			5,
 			timelineActions.Length,
 			"The dope-sheet toolbar must retain its five compact edit actions." );
+		Check(
+			report,
+			WidgetTree( timeline )
+				.OfType<WeaponAnimatorButton>()
+				.All( x => x.Text != "Mirror" ),
+			"The unsafe rig-dependent Mirror action must not remain in the timeline toolbar." );
 		Check(
 			report,
 			timelineActions.All( x =>
@@ -1796,6 +1803,171 @@ public static class WeaponAnimatorSelfTests
 			deleteClip.Tracks.SelectMany( x => x.Keys ).Count()
 				+ deleteClip.VisibilityTracks.SelectMany( x => x.Keys ).Count(),
 			"Deleting a mixed key selection must undo as one action." );
+	}
+
+	private static void TestTimelineKeyReversal( WeaponAnimatorSelfTestReport report )
+	{
+		var document = WeaponAnimationDocument.CreateDefault( "Timeline reverse" );
+		var clip = document.GetSelectedClip()!;
+		clip.Duration = 1;
+		clip.SampleRate = 30;
+		var track = clip.EnsureTrack( "weapon_root" );
+		track.Interpolation = TrackInterpolation.Linear;
+		var start = WeaponAnimationMath.UpsertKey(
+			track,
+			0,
+			new Transform( new Vector3( 0, 0, 0 ), Rotation.Identity, Vector3.One ) );
+		var end = WeaponAnimationMath.UpsertKey(
+			track,
+			1,
+			new Transform( new Vector3( 10, 0, 0 ), Rotation.Identity, Vector3.One ) );
+		start.CurveTangents.PositionOut = new Vector3( 4, 0, 0 );
+		end.CurveTangents.PositionIn = new Vector3( 12, 0, 0 );
+		var span = track.EnsureCurveSpan( start.Id, end.Id );
+		span.CustomChannels = TransformCurveChannel.PositionX;
+		span.HasSpeedCurve = true;
+		span.Speed = new MotionRateCurve
+		{
+			StartRate = 0.4f,
+			EndRate = 1.6f,
+			StartSlope = 0.5f,
+			EndSlope = -0.25f,
+			StartHandleMode = CurveHandleMode.Free,
+			EndHandleMode = CurveHandleMode.Aligned
+		};
+		var sampleTimes = new[] { 0.0f, 0.2f, 0.5f, 0.8f, 1.0f };
+		var sourceSamples = sampleTimes
+			.Select( x => WeaponAnimationMath.SampleTrack( track, x, Transform.Zero ).Position )
+			.ToArray();
+
+		var visibilityPart = new WeaponVisibilityPart { Name = "Magazine" };
+		document.Rig.VisibilityParts.Add( visibilityPart );
+		var visibility = clip.EnsureVisibilityTrack( visibilityPart.Id );
+		var hidden = new VisibilityKey { Time = 0, Visible = false };
+		var shown = new VisibilityKey { Time = 1, Visible = true };
+		visibility.Keys.AddRange( [hidden, shown] );
+
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+		controller.ReverseKeys();
+		clip = controller.Document.GetSelectedClip()!;
+		track = clip.EnsureTrack( "weapon_root" );
+		Equal(
+			report,
+			end.Id,
+			track.Keys[0].Id,
+			"With no key selection, Reverse must flip all transform keys across the clip." );
+		Equal(
+			report,
+			start.Id,
+			track.Keys[^1].Id,
+			"Whole-clip reversal must place the first key at the last frame." );
+		var reversedSpan = track.FindCurveSpan( end.Id, start.Id );
+		Check(
+			report,
+			reversedSpan is not null,
+			"Custom curve spans must reverse with their endpoint keys." );
+		if ( reversedSpan is not null )
+		{
+			Near(
+				report,
+				span.Speed.EndRate,
+				reversedSpan.Speed.StartRate,
+				0.0001f,
+				"Reversing a speed curve must swap its endpoint rates." );
+			Near(
+				report,
+				-span.Speed.EndSlope,
+				reversedSpan.Speed.StartSlope,
+				0.0001f,
+				"Reversing a speed curve must invert its former end slope." );
+			Equal(
+				report,
+				span.Speed.EndHandleMode,
+				reversedSpan.Speed.StartHandleMode,
+				"Reversing a speed curve must swap its handle modes." );
+		}
+		Near(
+			report,
+			-12,
+			track.Keys[0].CurveTangents.PositionOut.x,
+			0.0001f,
+			"Reversed channel curves must negate the former incoming tangent." );
+		Near(
+			report,
+			-4,
+			track.Keys[^1].CurveTangents.PositionIn.x,
+			0.0001f,
+			"Reversed channel curves must negate the former outgoing tangent." );
+		for ( var i = 0; i < sampleTimes.Length; i++ )
+		{
+			Near(
+				report,
+				sourceSamples[^(i + 1)],
+				WeaponAnimationMath.SampleTrack(
+					track,
+					sampleTimes[i],
+					Transform.Zero ).Position,
+				0.01f,
+				"Reversed custom curves must reproduce the original motion backward." );
+		}
+		visibility = clip.EnsureVisibilityTrack( visibilityPart.Id );
+		Equal(
+			report,
+			shown.Id,
+			visibility.Keys[0].Id,
+			"Whole-clip reversal must also flip visibility keys." );
+
+		controller.Undo();
+		clip = controller.Document.GetSelectedClip()!;
+		track = clip.EnsureTrack( "weapon_root" );
+		Equal(
+			report,
+			start.Id,
+			track.Keys[0].Id,
+			"Transform, curve, and visibility reversal must undo as one action." );
+
+		var selectionDocument = WeaponAnimationDocument.CreateDefault( "Selected reverse" );
+		var selectionClip = selectionDocument.GetSelectedClip()!;
+		selectionClip.Duration = 2;
+		selectionClip.SampleRate = 10;
+		var selectionTrack = selectionClip.EnsureTrack( "slide" );
+		var first = WeaponAnimationMath.UpsertKey(
+			selectionTrack,
+			0.2f,
+			new Transform( new Vector3( 2, 0, 0 ), Rotation.Identity, Vector3.One ) );
+		var middle = WeaponAnimationMath.UpsertKey(
+			selectionTrack,
+			0.6f,
+			new Transform( new Vector3( 6, 0, 0 ), Rotation.Identity, Vector3.One ) );
+		var last = WeaponAnimationMath.UpsertKey(
+			selectionTrack,
+			1.0f,
+			new Transform( new Vector3( 10, 0, 0 ), Rotation.Identity, Vector3.One ) );
+		var selectionController = new WeaponAnimatorController();
+		selectionController.SetDocument( selectionDocument );
+		selectionController.SetSelectedKeys( [first.Id, last.Id] );
+		selectionController.ReverseKeys();
+		selectionTrack = selectionController.Document.GetSelectedClip()!.EnsureTrack( "slide" );
+		Equal(
+			report,
+			last.Id,
+			selectionTrack.Keys[0].Id,
+			"Selected reversal must flip keys around the selected range, not the clip bounds." );
+		Equal(
+			report,
+			middle.Id,
+			selectionTrack.Keys[1].Id,
+			"Keys outside the reversed selection must retain their frame." );
+		Equal(
+			report,
+			first.Id,
+			selectionTrack.Keys[2].Id,
+			"Selected reversal must preserve key identities and selection." );
+		Check(
+			report,
+			selectionController.SelectedKeys.ToHashSet().SetEquals( [first.Id, last.Id] ),
+			"Reversed keys must remain selected for immediate follow-up editing." );
 	}
 
 	private static void TestTimelinePlayback( WeaponAnimatorSelfTestReport report )

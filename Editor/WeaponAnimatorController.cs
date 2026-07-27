@@ -789,25 +789,63 @@ public sealed class WeaponAnimatorController
 		SelectionChanged?.Invoke();
 	}
 
-	public void MirrorSelectedKeys()
+	public void ReverseKeys()
 	{
 		var clip = Document.GetSelectedClip();
-		if ( clip is null || _selectedKeys.Count == 0 )
+		if ( clip is null )
 			return;
 
-		Mutate( "Mirror keys", _ =>
+		var allKeyIds = clip.Tracks
+			.SelectMany( x => x.Keys.Select( key => key.Id ) )
+			.Concat( clip.VisibilityTracks.SelectMany( x => x.Keys.Select( key => key.Id ) ) )
+			.ToHashSet();
+		var reverseSelection = _selectedKeys.Where( allKeyIds.Contains ).ToHashSet();
+		var hasSelection = reverseSelection.Count > 0;
+		if ( !hasSelection )
+			reverseSelection = allKeyIds;
+		if ( reverseSelection.Count == 0 )
+			return;
+
+		var selectedFrames = clip.Tracks
+			.SelectMany( x => x.Keys )
+			.Select( x => (x.Id, x.Time) )
+			.Concat( clip.VisibilityTracks
+				.SelectMany( x => x.Keys )
+				.Select( x => (x.Id, x.Time) ) )
+			.Where( x => reverseSelection.Contains( x.Id ) )
+			.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
+			.ToArray();
+		var firstFrame = hasSelection ? selectedFrames.Min() : 0;
+		var lastFrame = hasSelection
+			? selectedFrames.Max()
+			: TimelineInteraction.LastFrame( clip );
+		if ( firstFrame == lastFrame )
+			return;
+
+		SetPlaying( false );
+		Mutate( hasSelection ? "Reverse selected keys" : "Reverse clip keys", _ =>
 		{
 			IdleBindPoseService.MarkAuthored( clip );
-			foreach ( var key in clip.Tracks
-				.SelectMany( x => x.Keys )
-				.Where( x => _selectedKeys.Contains( x.Id ) ) )
-			{
-				key.Position = key.Position.WithY( -key.Position.y );
-				var angles = key.Rotation.Angles();
-				key.Rotation = Rotation.From( angles.WithPitch( -angles.pitch ).WithRoll( -angles.roll ) );
-			}
+			foreach ( var track in clip.Tracks )
+				ReverseTransformTrack(
+					clip,
+					track,
+					reverseSelection,
+					firstFrame,
+					lastFrame );
+			foreach ( var track in clip.VisibilityTracks )
+				ReverseVisibilityTrack(
+					clip,
+					track,
+					reverseSelection,
+					firstFrame,
+					lastFrame );
 		} );
 	}
+
+	// Keeps an already-open pre-update window safe during S&box hotload.
+	[Obsolete( "Use ReverseKeys." )]
+	public void MirrorSelectedKeys() => ReverseKeys();
 
 	public void UpsertSelectedTransformKey( string target, RigControlKind kind, Transform value )
 	{
@@ -1107,6 +1145,204 @@ public sealed class WeaponAnimatorController
 		}
 		foreach ( var track in clip.VisibilityTracks )
 			track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+	}
+
+	private static void ReverseTransformTrack(
+		WeaponAnimationClip clip,
+		TransformTrack track,
+		IReadOnlySet<Guid> reversedKeys,
+		int firstFrame,
+		int lastFrame )
+	{
+		CurveEditingService.RepairTrack( track );
+		var originalOrder = track.Keys
+			.OrderBy( x => x.Time )
+			.Select( x => x.Id )
+			.ToArray();
+		var originalAdjacent = originalOrder
+			.Zip( originalOrder.Skip( 1 ), ( start, end ) => (start, end) )
+			.ToHashSet();
+		var originalSpans = track.CurveSpans
+			.GroupBy( x => (x.StartKeyId, x.EndKeyId) )
+			.ToDictionary( x => x.Key, x => CloneCurveSpan( x.First() ) );
+		var originalTangents = track.Keys.ToDictionary(
+			x => x.Id,
+			x => CloneCurveTangents( x.CurveTangents ) );
+		var originalLegacyTangents = track.Keys.ToDictionary(
+			x => x.Id,
+			x => (x.InTangent, x.OutTangent) );
+
+		foreach ( var key in track.Keys.Where( x => reversedKeys.Contains( x.Id ) ) )
+		{
+			var frame = TimelineInteraction.TimeToFrame( key.Time, clip.SampleRate );
+			key.Time = TimelineInteraction.FrameToTime(
+				firstFrame + lastFrame - frame,
+				clip.SampleRate );
+		}
+
+		RemoveUnselectedCollisions( clip, track.Keys, reversedKeys );
+		track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+		track.CurveSpans.Clear();
+		foreach ( var (start, end) in track.Keys.Zip(
+			track.Keys.Skip( 1 ),
+			( start, end ) => (start, end) ) )
+		{
+			if ( originalSpans.TryGetValue( (start.Id, end.Id), out var forwardSpan ) )
+			{
+				track.CurveSpans.Add( CloneCurveSpan( forwardSpan ) );
+				continue;
+			}
+
+			if ( originalSpans.TryGetValue( (end.Id, start.Id), out var backwardSpan ) )
+			{
+				track.CurveSpans.Add( ReverseCurveSpan( backwardSpan ) );
+				ApplyReversedTangents(
+					start,
+					end,
+					originalTangents,
+					originalLegacyTangents );
+				continue;
+			}
+
+			if ( originalAdjacent.Contains( (end.Id, start.Id) ) )
+			{
+				ApplyReversedTangents(
+					start,
+					end,
+					originalTangents,
+					originalLegacyTangents );
+				continue;
+			}
+
+			if ( originalAdjacent.Contains( (start.Id, end.Id) ) )
+				continue;
+
+			// New neighbors exposed by a collision use an explicit, predictable bridge.
+			var bridge = track.EnsureCurveSpan( start.Id, end.Id );
+			bridge.HasInterpolationOverride = true;
+			bridge.Interpolation = TrackInterpolation.Linear;
+		}
+
+		CurveEditingService.RepairTrack( track );
+	}
+
+	private static void ReverseVisibilityTrack(
+		WeaponAnimationClip clip,
+		VisibilityTrack track,
+		IReadOnlySet<Guid> reversedKeys,
+		int firstFrame,
+		int lastFrame )
+	{
+		foreach ( var key in track.Keys.Where( x => reversedKeys.Contains( x.Id ) ) )
+		{
+			var frame = TimelineInteraction.TimeToFrame( key.Time, clip.SampleRate );
+			key.Time = TimelineInteraction.FrameToTime(
+				firstFrame + lastFrame - frame,
+				clip.SampleRate );
+		}
+
+		RemoveUnselectedCollisions( clip, track.Keys, reversedKeys );
+		track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+	}
+
+	private static void RemoveUnselectedCollisions(
+		WeaponAnimationClip clip,
+		List<TransformKey> keys,
+		IReadOnlySet<Guid> reversedKeys )
+	{
+		var reversedFrames = keys
+			.Where( x => reversedKeys.Contains( x.Id ) )
+			.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
+			.ToHashSet();
+		keys.RemoveAll( x =>
+			!reversedKeys.Contains( x.Id )
+			&& reversedFrames.Contains(
+				TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) ) );
+	}
+
+	private static void RemoveUnselectedCollisions(
+		WeaponAnimationClip clip,
+		List<VisibilityKey> keys,
+		IReadOnlySet<Guid> reversedKeys )
+	{
+		var reversedFrames = keys
+			.Where( x => reversedKeys.Contains( x.Id ) )
+			.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
+			.ToHashSet();
+		keys.RemoveAll( x =>
+			!reversedKeys.Contains( x.Id )
+			&& reversedFrames.Contains(
+				TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) ) );
+	}
+
+	private static TransformCurveSpan CloneCurveSpan( TransformCurveSpan source ) => new()
+	{
+		Id = source.Id,
+		StartKeyId = source.StartKeyId,
+		EndKeyId = source.EndKeyId,
+		HasSpeedCurve = source.HasSpeedCurve,
+		Speed = CloneMotionRateCurve( source.Speed ),
+		HasInterpolationOverride = source.HasInterpolationOverride,
+		Interpolation = source.Interpolation,
+		CustomChannels = source.CustomChannels
+	};
+
+	private static TransformCurveSpan ReverseCurveSpan( TransformCurveSpan source )
+	{
+		var result = CloneCurveSpan( source );
+		result.StartKeyId = source.EndKeyId;
+		result.EndKeyId = source.StartKeyId;
+		result.Speed = new MotionRateCurve
+		{
+			StartRate = source.Speed.EndRate,
+			EndRate = source.Speed.StartRate,
+			StartSlope = -source.Speed.EndSlope,
+			EndSlope = -source.Speed.StartSlope,
+			StartHandleMode = source.Speed.EndHandleMode,
+			EndHandleMode = source.Speed.StartHandleMode
+		};
+		return result;
+	}
+
+	private static MotionRateCurve CloneMotionRateCurve( MotionRateCurve source ) => new()
+	{
+		StartRate = source.StartRate,
+		EndRate = source.EndRate,
+		StartSlope = source.StartSlope,
+		EndSlope = source.EndSlope,
+		StartHandleMode = source.StartHandleMode,
+		EndHandleMode = source.EndHandleMode
+	};
+
+	private static TransformCurveTangents CloneCurveTangents(
+		TransformCurveTangents source ) => new()
+	{
+		PositionIn = source.PositionIn,
+		PositionOut = source.PositionOut,
+		RotationIn = source.RotationIn,
+		RotationOut = source.RotationOut,
+		ScaleIn = source.ScaleIn,
+		ScaleOut = source.ScaleOut,
+		FreeHandles = source.FreeHandles
+	};
+
+	private static void ApplyReversedTangents(
+		TransformKey start,
+		TransformKey end,
+		IReadOnlyDictionary<Guid, TransformCurveTangents> tangents,
+		IReadOnlyDictionary<Guid, (Vector3 In, Vector3 Out)> legacyTangents )
+	{
+		var startSource = tangents[start.Id];
+		var endSource = tangents[end.Id];
+		start.CurveTangents.PositionOut = -startSource.PositionIn;
+		start.CurveTangents.RotationOut = -startSource.RotationIn;
+		start.CurveTangents.ScaleOut = -startSource.ScaleIn;
+		end.CurveTangents.PositionIn = -endSource.PositionOut;
+		end.CurveTangents.RotationIn = -endSource.RotationOut;
+		end.CurveTangents.ScaleIn = -endSource.ScaleOut;
+
+		start.OutTangent = -legacyTangents[start.Id].In;
+		end.InTangent = -legacyTangents[end.Id].Out;
 	}
 
 	private void RemoveKeyCollisions( WeaponAnimationClip clip )
