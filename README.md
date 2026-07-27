@@ -1,72 +1,159 @@
 # S&box Weapon Animator
 
-A native, document-based S&box editor workspace for calibrating rigged weapons, binding Facepunch first-person arms, authoring animation clips, and generating a ready-to-use viewmodel package.
+A native S&box editor tool for preparing rigged weapon models, posing Facepunch first-person arms, creating weapon animations, and generating a ready-to-use viewmodel.
 
-## Open the workspace
+> [!IMPORTANT]
+> This project is currently in **beta**. Core authoring is usable, but bugs and workflow changes should be expected. Keep your project under version control and report anything that behaves unexpectedly.
 
-1. Add this library to an S&box project.
-2. In the Asset Browser choose **New → Weapon Animation Project**.
-3. Double-click the resulting `.wepanim` asset.
+<!-- Add an editor screenshot here. -->
 
-The workspace can also be opened from **Tools → Weapon Animator**. It creates a private editor scene and never inserts preview objects into the active game scene.
+## Features
 
-## Workflow
+- A dedicated weapon-animation workspace with its own preview scene.
+- Import support for rigged FBX, SMD, DMX, and VMDL models.
+- Weapon hierarchy filtering for models containing unwanted arm or camera rigs.
+- Visual scale calibration, measurements, alignment tools, and output anchors.
+- Facepunch first-person arms with hand targets, elbow controls, finger posing, and reusable grip poses.
+- Standard weapon clip slots including Idle, Deploy, Fire, Reload, Holster, Inspect, and incremental reload animations.
+- Viewport Move, Rotate, and Scale gizmos with Local/World space and rotation snapping.
+- Whole-frame keyframing, marquee selection, dope-sheet navigation, playback controls, and reversible animations.
+- Speed and transform-channel curve editing with Bézier handles and easing presets.
+- Keyed visibility for magazines and other removable weapon parts.
+- Optional generation of a Facepunch-compatible AnimGraph and ready-to-use viewmodel prefab.
 
-- **Calibrate:** import a rigged FBX, SMD, DMX, or VMDL, select the weapon-bone subtree, exclude foreign branches, establish physical scale, set the grip, and optionally place rear/front markers for Auto-align.
-- **Animate:** browse the complete grouped rig at full height, pose the selected control with local/world numeric transforms or viewport gizmos, and commit poses to the timeline. To bind a hand, select that hand once in **Controls**, choose its **Attachment bone** in the inspector, then press **Bind**; multi-selection is not required. `weapon_root` is the normal grip attachment. The right column keeps the selected-control inspector above a vertically spacious clip rack, while the dope sheet remains beneath the viewport.
-- **Animate visibility:** select an isolated weapon bone such as a main or spare magazine, enable its **Visibility** channel, choose its default state, then key **Visible at playhead** or **Hidden at playhead**. These stepped rows appear above transform tracks in the dope sheet. Bone branches work for rigidly weighted parts; models with bodygroups can use explicit visible/hidden bodygroup values instead.
-- **Generate:** write the animation host, one SMD per clip, ModelDoc files, optional AnimGraph, prefab, and ownership manifest beneath `Assets/weapons/<project>/viewmodel/`.
+The workspace is independent of the normal scene editor. Opening or closing it does not add preview objects to your active game scene.
 
-Only manifest-owned outputs are replaced during regeneration.
-The viewport toolbar uses the standard **W** Move, **E** Rotate, and **R** Scale bindings.
-Its globe button switches the shared Local/World coordinate space; the selected-control
-transform labels follow that setting automatically.
-The adjacent angle-snap control enables or disables rotation snapping and edits its step
-from 0.25° through 180°; its arrow buttons move through the standard editor angle presets.
-The top-right camera controls switch between Orbit and Free Look and toggle Lit/Full Bright
-rendering. In Free Look, hold the right mouse button to look, use **WASD** to move, hold
-**Shift** to move faster, and scroll to adjust movement speed. A brief top-center readout
-confirms the current speed.
-With Auto-key disabled, transform edits are saved as per-clip working poses until **Key pose**
-or **Add key** commits them. Working poses are editor-only and never affect generated SMDs,
-hashes, onion skins, or prefab playback.
-The dope sheet keeps a full-clip range navigator above its frame ruler. Drag its handles to
-set the visible range, drag the highlighted region to pan, or use **Ctrl+scroll** to zoom
-around the current midpoint. The ruler and playhead scrub in whole frames. The key grid is
-reserved for click and marquee selection, and selected transform or visibility keys can be
-dragged together as one undoable frame-snapped edit. A guttered vertical scrollbar exposes
-every track while keeping the frame ruler and track-name column fixed.
-Press **Curves** to open the focused curve editor. Its searchable gutter contains every
-keyed weapon, arm, finger, target, and camera track. Select one part, then edit either its
-normalized **Speed** profile or any combination of position, rotation, and scale channels.
-Curve points use large square targets; selected points expose Bézier handles. Drag normally
-to keep facing handles aligned or hold **Alt** to break one side. Linear, Ease In, Ease Out,
-and Ease In-Out presets apply beside selected points, or to the full selected track when no
-points are selected. Plain wheel zooms values, middle-drag pans values, **F** fits the graph,
-and **Ctrl+wheel** continues to control the shared horizontal timeline range.
+## Installation
 
-Viewport guides are disabled for new projects. Grid opacity and line weight can be previewed
-live from **Edit → Preferences**; both settings affect the minor, major, and colored origin
-axes without affecting generated assets.
-The same Preferences window controls the cyan viewport edge light. It can be disabled or
-adjusted from 0–12 brightness, with a restrained default of 4. Full Bright disables this
-light automatically and gives the Facepunch arms a temporary neutral preview material so
-their skin remains visible; neither setting changes generated materials.
+Clone or download this repository into your S&box project's library folder:
 
-Schema-v2 projects are backed up before their first schema-v4 save. Weapon calibration,
-anchors, clips, tags, and compatible weapon tracks are preserved, while imported arm
-tracks and bindings are reset for the separated-rig workflow.
-Early schema-v3 projects with model-space Idle seed keys are repaired on open and receive
-a versioned backup before the repaired document is saved.
-Schema-v3 animation playback remains unchanged when upgraded to schema v4. Custom speed
-and channel curves are stored only after the user edits a span, and the pre-upgrade file is
-backed up before the migrated document is first saved.
-Generated Idle clips remain locked to the current calibrated bind pose until a deliberate
-key edit marks them as authored. Older pristine Idle clips polluted by inspector-selection
-writes are restored on open; unbound arm chains remain in the native Facepunch pose.
-Viewport gizmo and numeric scrubs preview continuously without rebuilding the surrounding
-workspace, then produce one undo action on release. The visible Facepunch arms mesh follows
-the evaluated arm pose directly, including finger and IK edits.
-Visibility state is exported as deterministic AnimGraph tags and a generated runtime
-controller. Graph-free prefabs sample the active sequence directly, so magazine visibility
-has the same result in the editor preview and final playback.
+```text
+<your-project>/Libraries/asterw.sbox-animator/
+```
+
+Open or reload the project and allow S&box to compile the library.
+
+## Create a weapon animation project
+
+1. Open the S&box Asset Browser.
+2. Choose **New → Weapon Animation Project**.
+3. Name the new `.wepanim` asset.
+4. Double-click it to open the Weapon Animator.
+
+The workspace can also be opened from **Tools → Weapon Animator**. No active scene or selected GameObject is required.
+
+## 1. Import and calibrate
+
+1. Press **Import rigged model** and select your weapon.
+2. Choose the weapon's hierarchy root.
+3. Review the retained bones and exclude unrelated branches such as imported character arms.
+4. Set the weapon's physical scale using the reference arms, model dimensions, or measurement tool.
+5. Place the **Primary grip** anchor where the firing hand should hold the weapon.
+6. Optionally place the front and rear alignment markers if the model needs automatic orientation.
+7. Place output anchors such as **Muzzle** and **Eject** where required.
+8. Confirm the rig and continue to the animation workspace.
+
+The original imported model is not modified.
+
+## 2. Bind the arms
+
+The Primary grip anchor is a weapon reference point; it does not automatically pose the hand.
+
+To bind a hand:
+
+1. Select **Primary hand** or **Support hand** from the Rig Browser.
+2. Choose its weapon attachment bone in the inspector. `weapon_root` is usually suitable for the primary hand.
+3. Press **Bind**.
+4. Move and rotate the hand target into position.
+5. Adjust the elbow controls and pose the fingers around the weapon.
+6. Save the completed setup as the default grip pose.
+
+Each hand is bound independently, so one-handed weapons are supported.
+
+## 3. Animate a clip
+
+1. Select a clip from the Clip Rack.
+2. Press **Start**, duplicate another clip, or import an existing animation.
+3. Select a weapon bone, arm bone, finger, or control from the Rig Browser.
+4. Pose it with the viewport gizmo or the numeric transform fields.
+5. Move the playhead and create additional keys.
+
+With **Auto-key** enabled, transform changes immediately create or update a key at the current frame. With Auto-key disabled, changes remain an unkeyed working pose until you press **Key pose** or **Add key**.
+
+Useful timeline tools include:
+
+- Drag the ruler to scrub through whole frames.
+- Drag across the key grid to marquee-select keys.
+- Drag selected keys to retime them.
+- Press **Delete** or **Backspace** to remove selected keys.
+- Use the range bar above the ruler to pan or zoom through longer clips.
+- Press **Curves** to edit motion speed or individual transform channels.
+- Press **Reverse** to reverse selected keys within their range. With nothing selected, it reverses the entire clip—useful when turning a Deploy animation into a Holster animation.
+
+## Part visibility
+
+Visibility tracks are useful for reload animations involving a main and spare magazine.
+
+1. Select the weapon bone that controls the part.
+2. Enable its visibility channel in the inspector.
+3. Set whether the part is visible by default.
+4. Add visible or hidden keys at the appropriate frames.
+
+Visibility appears as stepped tracks in the dope sheet and is included in generated playback.
+
+## Viewport controls
+
+| Control | Action |
+| --- | --- |
+| **W** | Move |
+| **E** | Rotate |
+| **R** | Scale |
+| Globe button | Toggle Local/World space |
+| Angle control | Toggle or adjust rotation snapping |
+| **Ctrl + scroll** over timeline | Zoom the visible frame range |
+| **F** in curve editor | Fit the visible curves |
+| Orbit / Free Look buttons | Change camera navigation mode |
+| **WASD** in Free Look | Move the camera |
+| **Shift** in Free Look | Move faster |
+| Scroll in Free Look | Adjust camera speed |
+
+The viewport also supports Lit and Full Bright preview modes, optional guides, grid adjustments, skeleton overlays, and onion skins.
+
+## Generate the viewmodel
+
+Save the `.wepanim` project, then press **Generate**.
+
+The default output is:
+
+```text
+Assets/weapons/<weapon-name>/viewmodel/
+```
+
+Generation can produce:
+
+- Compiled animation sequences.
+- An animation host model.
+- A ready-to-use viewmodel prefab.
+- An optional Facepunch-compatible AnimGraph.
+
+Only files owned by the Weapon Animator are replaced when generating again.
+
+## Beta limitations
+
+- Facepunch first-person human arms are the only supported arm profile.
+- Imported weapons must already contain usable bones, skin weights, and compatible materials.
+- Weapon rigs vary considerably, so hierarchy filtering and hand placement require manual review.
+- Imported foreign character meshes are not automatically removed from the source model.
+- Missing action clips may use idle or no-op fallbacks; Idle is required for generation.
+
+## Reporting problems
+
+Please open a GitHub issue with:
+
+- A short description of what you expected and what happened.
+- Steps that reproduce the problem.
+- The relevant S&box developer-log error.
+- The source model format and a brief description of its rig.
+- A screenshot or short recording when the problem is visual.
+
+Avoid uploading models that you do not have permission to redistribute.
