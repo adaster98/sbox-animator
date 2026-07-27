@@ -19,9 +19,12 @@ internal readonly record struct TimelineMarqueeBounds(
 	float Right,
 	float Bottom );
 
+internal readonly record struct TimelineKeyMarkerPosition( float X, float Y );
+
 internal static class TimelineInteraction
 {
 	public const int MinimumVisibleFrameIntervals = 2;
+	public const float KeyMarkerRadius = 5;
 
 	public static int LastFrame( WeaponAnimationClip clip ) =>
 		Math.Max( 1, (int)MathF.Floor(
@@ -157,6 +160,23 @@ internal static class TimelineInteraction
 
 		result.UnionWith( hits );
 		return result;
+	}
+
+	public static TimelineKeyMarkerPosition KeyMarkerPosition(
+		float timelineX,
+		float rowTop,
+		float graphLeft,
+		float graphRight,
+		float trackHeight )
+	{
+		var minimum = graphLeft + KeyMarkerRadius;
+		var maximum = graphRight - KeyMarkerRadius;
+		var x = maximum >= minimum
+			? Math.Clamp( timelineX, minimum, maximum )
+			: (graphLeft + graphRight) * 0.5f;
+		return new TimelineKeyMarkerPosition(
+			MathF.Round( x ),
+			MathF.Round( rowTop + trackHeight * 0.5f ) );
 	}
 
 	public static TimelineMarqueeBounds ProjectMarquee(

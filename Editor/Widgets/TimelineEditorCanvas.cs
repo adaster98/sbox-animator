@@ -589,7 +589,9 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		}
 
 		_dragMode = TimelineGridDragMode.Keys;
-		_dragStartFrame = _timeline.XToFrame( e.LocalPosition.x, Width );
+		_dragStartFrame = TimelineInteraction.TimeToFrame(
+			hit.Value.Time,
+			clip.SampleRate );
 		_dragStartTimes = SelectedKeyTimes( clip );
 		_timeline.Controller.BeginSelectedKeyMove();
 		e.Accepted = true;
@@ -906,15 +908,24 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		var x = _timeline.FrameToX( frame, Width );
 		if ( !IsGraphX( x ) )
 			return;
+		var marker = TimelineInteraction.KeyMarkerPosition(
+			x,
+			y,
+			_timeline.GraphLeft,
+			_timeline.BodyRight( Width ),
+			TimelineEditorCanvas.TrackHeight );
+		var radius = TimelineInteraction.KeyMarkerRadius;
 		var selected = _timeline.Controller.SelectedKeys.Contains( id );
+		Paint.Antialiasing = true;
 		Paint.SetBrushAndPen( selected ? Color.White : color );
 		Paint.DrawPolygon(
 		[
-			new Vector2( x, y + 5 ),
-			new Vector2( x + 5, y + TimelineEditorCanvas.TrackHeight * 0.5f ),
-			new Vector2( x, y + TimelineEditorCanvas.TrackHeight - 5 ),
-			new Vector2( x - 5, y + TimelineEditorCanvas.TrackHeight * 0.5f )
+			new Vector2( marker.X, marker.Y - radius ),
+			new Vector2( marker.X + radius, marker.Y ),
+			new Vector2( marker.X, marker.Y + radius ),
+			new Vector2( marker.X - radius, marker.Y )
 		] );
+		Paint.Antialiasing = false;
 	}
 
 	private TimelineKeyPoint? HitKey( WeaponAnimationClip clip, Vector2 position )
@@ -942,26 +953,38 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 			if ( track is null )
 				continue;
 			foreach ( var key in track.Keys )
+			{
+				var marker = TimelineInteraction.KeyMarkerPosition(
+					_timeline.FrameToX( key.Time * clip.SampleRate, Width ),
+					RowY( row ),
+					_timeline.GraphLeft,
+					_timeline.BodyRight( Width ),
+					TimelineEditorCanvas.TrackHeight );
 				yield return new TimelineKeyPoint(
 					key.Id,
 					key.Time,
 					row,
-					new Vector2(
-						_timeline.FrameToX( key.Time * clip.SampleRate, Width ),
-						RowY( row ) + TimelineEditorCanvas.TrackHeight * 0.5f ) );
+					new Vector2( marker.X, marker.Y ) );
+			}
 		}
 
 		for ( var index = 0; index < clip.Tracks.Count; index++ )
 		{
 			var row = parts.Count + index;
 			foreach ( var key in clip.Tracks[index].Keys )
+			{
+				var marker = TimelineInteraction.KeyMarkerPosition(
+					_timeline.FrameToX( key.Time * clip.SampleRate, Width ),
+					RowY( row ),
+					_timeline.GraphLeft,
+					_timeline.BodyRight( Width ),
+					TimelineEditorCanvas.TrackHeight );
 				yield return new TimelineKeyPoint(
 					key.Id,
 					key.Time,
 					row,
-					new Vector2(
-						_timeline.FrameToX( key.Time * clip.SampleRate, Width ),
-						RowY( row ) + TimelineEditorCanvas.TrackHeight * 0.5f ) );
+					new Vector2( marker.X, marker.Y ) );
+			}
 		}
 	}
 

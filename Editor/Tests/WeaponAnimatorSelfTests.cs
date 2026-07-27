@@ -1600,6 +1600,34 @@ public static class WeaponAnimatorSelfTests
 			wideTicks.MinorFrames > closeTicks.MinorFrames
 				&& wideTicks.MajorFrames > closeTicks.MajorFrames,
 			"Tick spacing must become coarser as the visible frame density increases." );
+		var marker = TimelineInteraction.KeyMarkerPosition(
+			337.42f, 44, 100, 500, TimelineEditorCanvas.TrackHeight );
+		Near(
+			report,
+			337,
+			marker.X,
+			0.0001f,
+			"Key markers must snap horizontally to whole pixels." );
+		Near(
+			report,
+			55,
+			marker.Y,
+			0.0001f,
+			"Key markers must remain vertically centered on their row." );
+		Near(
+			report,
+			105,
+			TimelineInteraction.KeyMarkerPosition(
+				100, 0, 100, 500, TimelineEditorCanvas.TrackHeight ).X,
+			0.0001f,
+			"First-frame diamonds must remain fully inside the graph." );
+		Near(
+			report,
+			495,
+			TimelineInteraction.KeyMarkerPosition(
+				500, 0, 100, 500, TimelineEditorCanvas.TrackHeight ).X,
+			0.0001f,
+			"Last-frame diamonds must not be covered by the scrollbar gutter." );
 
 		var controller = new WeaponAnimatorController();
 		controller.SetDocument( document );
