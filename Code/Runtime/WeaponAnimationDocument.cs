@@ -83,6 +83,37 @@ public enum TrackInterpolation
 	Cubic
 }
 
+public enum CurveEditorMode
+{
+	Speed,
+	Channels
+}
+
+[Flags]
+public enum TransformCurveChannel
+{
+	None = 0,
+	PositionX = 1 << 0,
+	PositionY = 1 << 1,
+	PositionZ = 1 << 2,
+	RotationX = 1 << 3,
+	RotationY = 1 << 4,
+	RotationZ = 1 << 5,
+	ScaleX = 1 << 6,
+	ScaleY = 1 << 7,
+	ScaleZ = 1 << 8,
+	Position = PositionX | PositionY | PositionZ,
+	Rotation = RotationX | RotationY | RotationZ,
+	Scale = ScaleX | ScaleY | ScaleZ,
+	All = Position | Rotation | Scale
+}
+
+public enum CurveHandleMode
+{
+	Aligned,
+	Free
+}
+
 public enum AnimationTagKind
 {
 	Point,
@@ -126,7 +157,7 @@ public enum VisibilityRenderMode
 
 public sealed class WeaponAnimationDocument
 {
-	public const int CurrentSchemaVersion = 3;
+	public const int CurrentSchemaVersion = 4;
 
 	public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 	public Guid DocumentId { get; set; } = Guid.NewGuid();
@@ -491,7 +522,27 @@ public sealed class TransformTrack
 	public RigControlKind Kind { get; set; } = RigControlKind.Weapon;
 	public TrackInterpolation Interpolation { get; set; } = TrackInterpolation.Cubic;
 	public List<TransformKey> Keys { get; set; } = [];
+	public List<TransformCurveSpan> CurveSpans { get; set; } = [];
 	public bool Muted { get; set; }
+
+	public TransformCurveSpan? FindCurveSpan( Guid startKeyId, Guid endKeyId ) =>
+		CurveSpans.FirstOrDefault( x =>
+			x.StartKeyId == startKeyId && x.EndKeyId == endKeyId );
+
+	public TransformCurveSpan EnsureCurveSpan( Guid startKeyId, Guid endKeyId )
+	{
+		var span = FindCurveSpan( startKeyId, endKeyId );
+		if ( span is not null )
+			return span;
+
+		span = new TransformCurveSpan
+		{
+			StartKeyId = startKeyId,
+			EndKeyId = endKeyId
+		};
+		CurveSpans.Add( span );
+		return span;
+	}
 }
 
 public sealed class TransformKey
@@ -501,8 +552,43 @@ public sealed class TransformKey
 	public Vector3 Position { get; set; }
 	public Rotation Rotation { get; set; } = Rotation.Identity;
 	public Vector3 Scale { get; set; } = Vector3.One;
+	// Retained for schema-v3 compatibility; migrated into CurveTangents.
 	public Vector3 InTangent { get; set; }
 	public Vector3 OutTangent { get; set; }
+	public TransformCurveTangents CurveTangents { get; set; } = new();
+}
+
+public sealed class TransformCurveSpan
+{
+	public Guid Id { get; set; } = Guid.NewGuid();
+	public Guid StartKeyId { get; set; }
+	public Guid EndKeyId { get; set; }
+	public bool HasSpeedCurve { get; set; }
+	public MotionRateCurve Speed { get; set; } = new();
+	public bool HasInterpolationOverride { get; set; }
+	public TrackInterpolation Interpolation { get; set; } = TrackInterpolation.Linear;
+	public TransformCurveChannel CustomChannels { get; set; }
+}
+
+public sealed class MotionRateCurve
+{
+	public float StartRate { get; set; } = 1.0f;
+	public float EndRate { get; set; } = 1.0f;
+	public float StartSlope { get; set; }
+	public float EndSlope { get; set; }
+	public CurveHandleMode StartHandleMode { get; set; } = CurveHandleMode.Aligned;
+	public CurveHandleMode EndHandleMode { get; set; } = CurveHandleMode.Aligned;
+}
+
+public sealed class TransformCurveTangents
+{
+	public Vector3 PositionIn { get; set; }
+	public Vector3 PositionOut { get; set; }
+	public Vector3 RotationIn { get; set; }
+	public Vector3 RotationOut { get; set; }
+	public Vector3 ScaleIn { get; set; }
+	public Vector3 ScaleOut { get; set; }
+	public TransformCurveChannel FreeHandles { get; set; }
 }
 
 public sealed class TimedConstraint
@@ -580,6 +666,7 @@ public sealed class WorkspaceState
 	public bool CurveEditorVisible { get; set; }
 	public List<WorkingPoseOverride> WorkingPoseOverrides { get; set; } = [];
 	public List<TimelineViewState> TimelineViews { get; set; } = [];
+	public List<CurveViewState> CurveViews { get; set; } = [];
 	public Vector3 CameraFocus { get; set; }
 	public Angles CameraAngles { get; set; } = new( 12, 180, 0 );
 	public float CameraDistance { get; set; } = 48.0f;
@@ -611,6 +698,20 @@ public sealed class WorkspaceState
 			VisibleEnd = MathF.Max( duration, 0 )
 		};
 		TimelineViews.Add( existing );
+		return existing;
+	}
+
+	public CurveViewState? GetCurveView( Guid clipId ) =>
+		CurveViews.FirstOrDefault( x => x.ClipId == clipId );
+
+	public CurveViewState EnsureCurveView( Guid clipId )
+	{
+		var existing = GetCurveView( clipId );
+		if ( existing is not null )
+			return existing;
+
+		existing = new CurveViewState { ClipId = clipId };
+		CurveViews.Add( existing );
 		return existing;
 	}
 
@@ -657,6 +758,19 @@ public sealed class TimelineViewState
 	public float VisibleStart { get; set; }
 	public float VisibleEnd { get; set; }
 	public float VerticalScroll { get; set; }
+}
+
+public sealed class CurveViewState
+{
+	public Guid ClipId { get; set; }
+	public Guid SelectedTrackId { get; set; }
+	public CurveEditorMode Mode { get; set; }
+	public TransformCurveChannel VisibleChannels { get; set; }
+	public string Search { get; set; } = "";
+	public float TrackScroll { get; set; }
+	public bool HasVerticalRange { get; set; }
+	public float VerticalMinimum { get; set; }
+	public float VerticalMaximum { get; set; } = 2.0f;
 }
 
 public sealed class WorkingPoseOverride

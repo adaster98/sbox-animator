@@ -886,6 +886,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			state.AnimationMainSplitterState = "";
 			state.AnimationOuterSplitterState = "";
 			state.TimelineViews.Clear();
+			state.CurveViews.Clear();
 		} );
 		BuildWorkspace();
 		_viewport?.FitCamera();

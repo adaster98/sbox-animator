@@ -10,6 +10,7 @@ namespace SboxWeaponAnimator.Editor;
 public sealed class WeaponAnimationMigrationResult
 {
 	public bool Migrated { get; init; }
+	public bool CurveSchemaMigrated { get; init; }
 	public bool RepairedLegacyIdle { get; init; }
 	public int SourceSchemaVersion { get; init; }
 	public int PreservedWeaponTracks { get; init; }
@@ -23,6 +24,12 @@ public sealed class WeaponAnimationMigrationResult
 		{
 			if ( Migrated )
 			{
+				if ( CurveSchemaMigrated && SourceSchemaVersion >= 3 )
+				{
+					return $"Migrated schema {SourceSchemaVersion} → {WeaponAnimationDocument.CurrentSchemaVersion}. "
+						+ "Existing interpolation was preserved; editable curve data will be created only when changed.";
+				}
+
 				return $"Migrated schema {SourceSchemaVersion} → {WeaponAnimationDocument.CurrentSchemaVersion}. "
 					+ $"Preserved {PreservedWeaponTracks} weapon tracks; reset {RemovedTracks} arm or incompatible tracks"
 					+ (RemovedConstraints > 0 ? $" and {RemovedConstraints} constraints." : ".");
@@ -49,12 +56,14 @@ public static class WeaponAnimationMigration
 		}
 
 		var sourceVersion = document.SchemaVersion;
-		var migrated = sourceVersion < 3;
+		var migrated = sourceVersion < WeaponAnimationDocument.CurrentSchemaVersion;
+		var separatedRigMigration = sourceVersion < 3;
+		var curveSchemaMigration = sourceVersion < 4;
 		var preservedTracks = 0;
 		var removedTracks = 0;
 		var removedConstraints = 0;
 
-		if ( migrated )
+		if ( separatedRigMigration )
 		{
 			WeaponRigHierarchy.RepairMetadata( document.Rig, true );
 			foreach ( var bone in document.Rig.Bones )
@@ -122,7 +131,21 @@ public static class WeaponAnimationMigration
 			WeaponRigHierarchy.RepairMetadata( document.Rig, false );
 		}
 
-		var repairedLegacyIdle = !migrated && RepairLegacyIdleBindPose( document );
+		foreach ( var track in document.Clips.SelectMany( x => x.Tracks ) )
+		{
+			foreach ( var key in track.Keys )
+			{
+				key.CurveTangents ??= new TransformCurveTangents();
+				if ( curveSchemaMigration )
+				{
+					key.CurveTangents.PositionIn = key.InTangent;
+					key.CurveTangents.PositionOut = key.OutTangent;
+				}
+			}
+			WeaponAnimationMath.RepairCurveSpans( track );
+		}
+
+		var repairedLegacyIdle = !separatedRigMigration && RepairLegacyIdleBindPose( document );
 		document.SchemaVersion = WeaponAnimationDocument.CurrentSchemaVersion;
 		foreach ( var role in WeaponAnimationDocument.StandardClips() )
 			document.EnsureClip( role );
@@ -135,6 +158,7 @@ public static class WeaponAnimationMigration
 		return new WeaponAnimationMigrationResult
 		{
 			Migrated = migrated,
+			CurveSchemaMigrated = curveSchemaMigration,
 			RepairedLegacyIdle = repairedLegacyIdle,
 			SourceSchemaVersion = sourceVersion,
 			PreservedWeaponTracks = preservedTracks,

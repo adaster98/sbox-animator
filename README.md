@@ -36,6 +36,14 @@ around the current midpoint. The ruler and playhead scrub in whole frames. The k
 reserved for click and marquee selection, and selected transform or visibility keys can be
 dragged together as one undoable frame-snapped edit. A guttered vertical scrollbar exposes
 every track while keeping the frame ruler and track-name column fixed.
+Press **Curves** to open the focused curve editor. Its searchable gutter contains every
+keyed weapon, arm, finger, target, and camera track. Select one part, then edit either its
+normalized **Speed** profile or any combination of position, rotation, and scale channels.
+Curve points use large square targets; selected points expose Bézier handles. Drag normally
+to keep facing handles aligned or hold **Alt** to break one side. Linear, Ease In, Ease Out,
+and Ease In-Out presets apply beside selected points, or to the full selected track when no
+points are selected. Plain wheel zooms values, middle-drag pans values, **F** fits the graph,
+and **Ctrl+wheel** continues to control the shared horizontal timeline range.
 
 Viewport guides are disabled for new projects. Grid opacity and line weight can be previewed
 live from **Edit → Preferences**; both settings affect the minor, major, and colored origin
@@ -45,11 +53,14 @@ adjusted from 0–12 brightness, with a restrained default of 4. Full Bright dis
 light automatically and gives the Facepunch arms a temporary neutral preview material so
 their skin remains visible; neither setting changes generated materials.
 
-Schema-v2 projects are backed up before their first schema-v3 save. Weapon calibration,
+Schema-v2 projects are backed up before their first schema-v4 save. Weapon calibration,
 anchors, clips, tags, and compatible weapon tracks are preserved, while imported arm
 tracks and bindings are reset for the separated-rig workflow.
 Early schema-v3 projects with model-space Idle seed keys are repaired on open and receive
 a versioned backup before the repaired document is saved.
+Schema-v3 animation playback remains unchanged when upgraded to schema v4. Custom speed
+and channel curves are stored only after the user edits a span, and the pre-upgrade file is
+backed up before the migrated document is first saved.
 Generated Idle clips remain locked to the current calibrated bind pose until a deliberate
 key edit marks them as authored. Older pristine Idle clips polluted by inspector-selection
 writes are restored on open; unbound arm chains remain in the native Facepunch pose.

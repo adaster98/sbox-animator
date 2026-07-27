@@ -433,6 +433,7 @@ public sealed class ClipRackPanel : Widget
 		{
 			document.Workspace.ClearWorkingPoses( clip.Id );
 			document.Workspace.TimelineViews.RemoveAll( x => x.ClipId == clip.Id );
+			document.Workspace.CurveViews.RemoveAll( x => x.ClipId == clip.Id );
 			clip.VisibilityTracks.Clear();
 			var skeleton = HostSkeletonBuilder.Build( document );
 			if ( clip.Role == WeaponClipRole.Idle )
@@ -484,6 +485,8 @@ public sealed class ClipRackPanel : Widget
 			_controller.Document.Workspace.ClearWorkingPoses( destination.Id );
 			_controller.Document.Workspace.TimelineViews.RemoveAll( x =>
 				x.ClipId == destination.Id );
+			_controller.Document.Workspace.CurveViews.RemoveAll( x =>
+				x.ClipId == destination.Id );
 			var copy = Json.Deserialize<WeaponAnimationClip>( Json.Serialize( source ) )!;
 			destination.Duration = copy.Duration;
 			destination.SampleRate = copy.SampleRate;
@@ -520,6 +523,8 @@ public sealed class ClipRackPanel : Widget
 				{
 					document.Workspace.ClearWorkingPoses( selected.Id );
 					document.Workspace.TimelineViews.RemoveAll( x =>
+						x.ClipId == selected.Id );
+					document.Workspace.CurveViews.RemoveAll( x =>
 						x.ClipId == selected.Id );
 					selected.IsBindPoseSeed = false;
 					result = SequenceImportService.Import( document, selected, captured );
@@ -1146,6 +1151,7 @@ public sealed class AnimationTimelinePanel : Widget
 	private readonly TimelineControlToolbar _toolbar;
 	private readonly Label _timeLabel;
 	private readonly WeaponAnimatorButton _playButton;
+	private readonly WeaponAnimatorButton _curvesButton;
 
 	public AnimationTimelinePanel( WeaponAnimatorController controller, Widget? parent = null ) : base( parent )
 	{
@@ -1161,13 +1167,14 @@ public sealed class AnimationTimelinePanel : Widget
 		left.Layout.Add( CompactAction( "Paste", "content_paste", _controller.PasteKeys, left ) );
 		left.Layout.Add( CompactAction( "Delete", "delete", _controller.DeleteSelectedKeys, left ) );
 		left.Layout.Add( CompactAction( "Mirror", "flip", _controller.MirrorSelectedKeys, left ) );
-		left.Layout.Add( CompactAction(
+		_curvesButton = CompactAction(
 			"Curves",
 			"show_chart",
-			() => _controller.Mutate(
-				"Curve editor visibility",
-				d => d.Workspace.CurveEditorVisible = !d.Workspace.CurveEditorVisible ),
-			left ) );
+			() => _controller.SetCurveEditorVisible(
+				!_controller.Document.Workspace.CurveEditorVisible ),
+			left );
+		_curvesButton.IsToggle = true;
+		left.Layout.Add( _curvesButton );
 
 		var player = _toolbar.CenterSection;
 		player.Layout.Spacing = 3;
@@ -1189,6 +1196,7 @@ public sealed class AnimationTimelinePanel : Widget
 		Layout.Add( _timeline, 1 );
 		_controller.DocumentChanged += Refresh;
 		_controller.TimelineChanged += Refresh;
+		_controller.TimelineViewChanged += Refresh;
 		_controller.PlaybackChanged += Refresh;
 		Refresh();
 	}
@@ -1197,6 +1205,7 @@ public sealed class AnimationTimelinePanel : Widget
 	{
 		_controller.DocumentChanged -= Refresh;
 		_controller.TimelineChanged -= Refresh;
+		_controller.TimelineViewChanged -= Refresh;
 		_controller.PlaybackChanged -= Refresh;
 		base.OnDestroyed();
 	}
@@ -1266,6 +1275,17 @@ public sealed class AnimationTimelinePanel : Widget
 		}
 		_playButton.Icon = _controller.IsPlaying ? "pause" : "play_arrow";
 		_playButton.ToolTip = _controller.IsPlaying ? "Pause" : "Play";
+		var curves = _controller.Document.Workspace.CurveEditorVisible;
+		_curvesButton.IsChecked = curves;
+		_curvesButton.Text = curves ? "Keys" : "Curves";
+		_curvesButton.Icon = curves ? "view_timeline" : "show_chart";
+		_curvesButton.Tint = curves
+			? WeaponAnimatorTheme.Cyan * 0.65f
+			: WeaponAnimatorTheme.SurfaceRaised;
+		_curvesButton.ToolTip = curves
+			? "Return to the keyframe view"
+			: "Open the curve editor";
+		_curvesButton.FitToContent( true );
 		_toolbar.FitSections();
 		_timeline.Update();
 	}

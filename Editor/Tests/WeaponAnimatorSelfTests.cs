@@ -43,6 +43,7 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "content-sized buttons", TestContentSizedButtons );
 		Run( report, "alignment", TestAlignment );
 		Run( report, "track interpolation", TestInterpolation );
+		Run( report, "curve editor v2", TestCurveEditorV2 );
 		Run( report, "frame snapping", TestFrameSnapping );
 		Run( report, "timeline navigation", TestTimelineNavigation );
 		Run( report, "timeline selection and movement", TestTimelineSelectionAndMovement );
@@ -1227,6 +1228,333 @@ public static class WeaponAnimatorSelfTests
 		Near( report, 1, RotationLength( halfway.Rotation ), 0.0001f, "Sampled quaternions must remain normalized." );
 		track.Interpolation = TrackInterpolation.Cubic;
 		Near( report, 1.56f, WeaponAnimationMath.SampleTrack( track, 0.25f, Transform.Zero ).Position.x, 0.01f, "Cubic interpolation must use smoothstep timing." );
+	}
+
+	private static void TestCurveEditorV2( WeaponAnimatorSelfTestReport report )
+	{
+		var document = WeaponAnimationDocument.CreateDefault( "Curves" );
+		var clip = document.GetSelectedClip()!;
+		clip.Duration = 2;
+		clip.SampleRate = 30;
+		clip.Tracks.Clear();
+		foreach ( var (target, kind) in new[]
+		{
+			("weapon_root", RigControlKind.Weapon),
+			("finger_index_1_R", RigControlKind.Arm),
+			("@primary_hand", RigControlKind.Arm),
+			("camera", RigControlKind.Camera)
+		} )
+		{
+			var keyed = clip.EnsureTrack( target );
+			keyed.Kind = kind;
+			WeaponAnimationMath.UpsertKey( keyed, 0, Transform.Zero );
+		}
+		Equal(
+			report,
+			4,
+			CurveEditingService.KeyedTracks( clip ).Count,
+			"Curve track enumeration must include every keyed weapon, arm, target, and camera track." );
+		Equal(
+			report,
+			1,
+			CurveEditingService.KeyedTracks( clip, "finger" ).Count,
+			"Curve track search must filter without truncating the keyed-track source." );
+
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+		controller.SetCurveEditorVisible( true );
+		Check(
+			report,
+			document.Workspace.CurveEditorVisible,
+			"The Curves toggle must enter persistent curve-editor mode." );
+		controller.SelectCurveTrack( clip, clip.Tracks[^1].Id );
+		controller.SetCurveMode( clip, CurveEditorMode.Channels );
+		controller.SetCurveChannels(
+			clip,
+			TransformCurveChannel.PositionX | TransformCurveChannel.RotationY );
+		var view = document.Workspace.EnsureCurveView( clip.Id );
+		Equal(
+			report,
+			clip.Tracks[^1].Id,
+			view.SelectedTrackId,
+			"Selected curve tracks must persist per clip." );
+		Check(
+			report,
+			(view.VisibleChannels & TransformCurveChannel.RotationY) != 0,
+			"Multiple visible transform channels must persist together." );
+
+		var motion = new TransformTrack { Interpolation = TrackInterpolation.Cubic };
+		var start = WeaponAnimationMath.UpsertKey(
+			motion,
+			0,
+			new Transform( Vector3.Zero, Rotation.FromYaw( 170 ), Vector3.One ) );
+		var end = WeaponAnimationMath.UpsertKey(
+			motion,
+			1,
+			new Transform(
+				new Vector3( 10, 0, 0 ),
+				Rotation.FromYaw( -170 ),
+				new Vector3( 1, 3, 1 ) ) );
+		CurveEditingService.ApplyPreset(
+			motion,
+			[],
+			CurveEditorMode.Speed,
+			TransformCurveChannel.PositionX,
+			CurvePreset.EaseIn );
+		var speedSpan = motion.FindCurveSpan( start.Id, end.Id )!;
+		Near(
+			report,
+			1,
+			WeaponAnimationMath.MotionRateArea( speedSpan.Speed ),
+			0.001f,
+			"Ease-in speed curves must normalize to a complete one-span traversal." );
+		Near(
+			report,
+			0,
+			WeaponAnimationMath.SampleMotionRate( speedSpan.Speed, 0 ),
+			0.0001f,
+			"Ease-in speed must begin at 0×." );
+		Near(
+			report,
+			2,
+			WeaponAnimationMath.SampleMotionRate( speedSpan.Speed, 1 ),
+			0.0001f,
+			"Ease-in speed must end at 2×." );
+		Near(
+			report,
+			2.5f,
+			WeaponAnimationMath.SampleTrack( motion, 0.5f, Transform.Zero ).Position.x,
+			0.02f,
+			"Integrated speed must drive monotonic normalized motion progress." );
+
+		speedSpan.Speed = new MotionRateCurve
+		{
+			StartRate = -2,
+			EndRate = -1
+		};
+		Near(
+			report,
+			0,
+			WeaponAnimationMath.SampleMotionRate( speedSpan.Speed, 0.5f ),
+			0.0001f,
+			"Motion-rate curves must clamp negative rates at 0×." );
+		Near(
+			report,
+			0.5f,
+			WeaponAnimationMath.SampleMotionProgress( speedSpan.Speed, 0.5f ),
+			0.0001f,
+			"Zero-area speed curves must fall back to linear timing." );
+
+		speedSpan.HasSpeedCurve = false;
+		speedSpan.HasInterpolationOverride = true;
+		speedSpan.Interpolation = TrackInterpolation.Linear;
+		CurveEditingService.ApplyPreset(
+			motion,
+			[],
+			CurveEditorMode.Channels,
+			TransformCurveChannel.PositionX
+				| TransformCurveChannel.RotationY
+				| TransformCurveChannel.ScaleY,
+			CurvePreset.EaseInOut );
+		var quarter = WeaponAnimationMath.SampleTrack( motion, 0.25f, Transform.Zero );
+		Near(
+			report,
+			1.5625f,
+			quarter.Position.x,
+			0.01f,
+			"Position channel tangents must evaluate as cubic Hermite curves." );
+		Near(
+			report,
+			1.3125f,
+			quarter.Scale.y,
+			0.01f,
+			"Scale channel tangents must evaluate independently." );
+		var rotationSample = WeaponAnimationMath.SampleTrack( motion, 0.5f, Transform.Zero );
+		Near(
+			report,
+			1,
+			RotationLength( rotationSample.Rotation ),
+			0.0001f,
+			"Custom Euler rotation channels must normalize their output quaternion." );
+		Check(
+			report,
+			MathF.Abs( MathF.Abs( rotationSample.Rotation.Angles().yaw ) - 180 ) < 1,
+			"Rotation channels must unwrap through the shortest angular path." );
+		Check(
+			report,
+			(start.CurveTangents.FreeHandles & TransformCurveChannel.PositionX) == 0,
+			"Curve handles must be aligned by default." );
+		CurveEditingService.SetTangent(
+			start,
+			TransformCurveChannel.PositionX,
+			false,
+			4,
+			true );
+		Check(
+			report,
+			(start.CurveTangents.FreeHandles & TransformCurveChannel.PositionX) != 0,
+			"Alt-style tangent edits must be able to break one handle side." );
+		CurveEditingService.AlignHandles(
+			start,
+			TransformCurveChannel.PositionX );
+		Near(
+			report,
+			CurveEditingService.GetTangent(
+				start,
+				TransformCurveChannel.PositionX,
+				true ),
+			CurveEditingService.GetTangent(
+				start,
+				TransformCurveChannel.PositionX,
+				false ),
+			0.0001f,
+			"Handle alignment must restore matching facing tangents." );
+
+		var topology = new TransformTrack();
+		var first = WeaponAnimationMath.UpsertKey(
+			topology, 0, new Transform( Vector3.Zero ) );
+		var middle = WeaponAnimationMath.UpsertKey(
+			topology, 1, new Transform( Vector3.One ) );
+		var last = WeaponAnimationMath.UpsertKey(
+			topology, 2, new Transform( Vector3.One * 2 ) );
+		topology.EnsureCurveSpan( first.Id, middle.Id ).HasSpeedCurve = true;
+		topology.EnsureCurveSpan( middle.Id, last.Id ).HasSpeedCurve = true;
+		CurveEditingService.RemoveKeysAndRepair( topology, x => x.Id == middle.Id );
+		var repaired = topology.FindCurveSpan( first.Id, last.Id );
+		Check(
+			report,
+			repaired?.HasInterpolationOverride == true
+				&& repaired.Interpolation == TrackInterpolation.Linear,
+			"Deleting a curve endpoint must create a safe linear bridge between new neighbors." );
+
+		var legacy = WeaponAnimationDocument.CreateDefault( "Schema 3 curves" );
+		legacy.SchemaVersion = 3;
+		var legacyClip = legacy.EnsureClip( WeaponClipRole.Fire );
+		var legacyTrack = legacyClip.EnsureTrack( "legacy" );
+		legacyTrack.Interpolation = TrackInterpolation.Cubic;
+		WeaponAnimationMath.UpsertKey(
+			legacyTrack, 0, new Transform( Vector3.Zero ) );
+		WeaponAnimationMath.UpsertKey(
+			legacyTrack, 1, new Transform( new Vector3( 10, 0, 0 ) ) );
+		var before = WeaponAnimationMath.SampleTrack(
+			legacyTrack, 0.25f, Transform.Zero );
+		var migration = WeaponAnimationMigration.MigrateAndRepair( legacy );
+		var after = WeaponAnimationMath.SampleTrack(
+			legacyTrack, 0.25f, Transform.Zero );
+		Check(
+			report,
+			migration.CurveSchemaMigrated
+				&& legacy.SchemaVersion == WeaponAnimationDocument.CurrentSchemaVersion,
+			"Schema-v3 documents must migrate to schema v4." );
+		Near(
+			report,
+			before.Position,
+			after.Position,
+			0.0001f,
+			"Schema-v3 migration must preserve exact legacy playback." );
+		Check(
+			report,
+			legacyTrack.CurveSpans.Count == 0,
+			"Migration must not materialize custom curve spans until edited." );
+
+		var lifecycleDocument = WeaponAnimationDocument.CreateDefault( "Curve lifecycle" );
+		var lifecycleClip = lifecycleDocument.GetSelectedClip()!;
+		lifecycleClip.Duration = 2;
+		lifecycleClip.SampleRate = 30;
+		lifecycleClip.Tracks.Clear();
+		var lifecycleTrack = lifecycleClip.EnsureTrack( "slide" );
+		var lifecycleStart = WeaponAnimationMath.UpsertKey(
+			lifecycleTrack, 0, new Transform( Vector3.Zero ) );
+		var lifecycleEnd = WeaponAnimationMath.UpsertKey(
+			lifecycleTrack, 1, new Transform( new Vector3( 4, 0, 0 ) ) );
+		CurveEditingService.ApplyPreset(
+			lifecycleTrack,
+			[],
+			CurveEditorMode.Speed,
+			TransformCurveChannel.PositionX,
+			CurvePreset.EaseOut );
+		var lifecycleSpanId = lifecycleTrack.CurveSpans.Single().Id;
+		var lifecycleController = new WeaponAnimatorController();
+		lifecycleController.SetDocument( lifecycleDocument );
+		lifecycleController.SetSelectedKeys(
+			[lifecycleStart.Id, lifecycleEnd.Id] );
+		var starts = lifecycleTrack.Keys.ToDictionary( x => x.Id, x => x.Time );
+		lifecycleController.BeginSelectedKeyMove();
+		lifecycleController.UpdateSelectedKeyMove( starts, 5 );
+		lifecycleController.EndSelectedKeyMove( starts, 5 );
+		lifecycleTrack = lifecycleController.Document.GetSelectedClip()!
+			.Tracks.Single( x => x.Target == "slide" );
+		Check(
+			report,
+			lifecycleTrack.CurveSpans.Any( x => x.Id == lifecycleSpanId ),
+			"Moving curve endpoints must retain their stable span data." );
+
+		lifecycleController.CopySelectedKeys();
+		lifecycleController.SetTimelineFrame( 5 );
+		lifecycleController.PasteKeys();
+		lifecycleTrack = lifecycleController.Document.GetSelectedClip()!
+			.Tracks.Single( x => x.Target == "slide" );
+		Check(
+			report,
+			lifecycleTrack.CurveSpans.Any( x =>
+				x.HasSpeedCurve
+					&& lifecycleController.SelectedKeys.Contains( x.StartKeyId )
+					&& lifecycleController.SelectedKeys.Contains( x.EndKeyId ) ),
+			"Copy and paste must preserve a span curve only when both endpoint keys are copied." );
+
+		var invalidDocument = ValidDocument();
+		var invalidClip = invalidDocument.EnsureClip( WeaponClipRole.Fire );
+		var invalidTrack = invalidClip.EnsureTrack( "weapon_root" );
+		var invalidStart = WeaponAnimationMath.UpsertKey(
+			invalidTrack, 0, new Transform( Vector3.Zero ) );
+		var invalidEnd = WeaponAnimationMath.UpsertKey(
+			invalidTrack, 1, new Transform( Vector3.One ) );
+		var invalidSpan = invalidTrack.EnsureCurveSpan(
+			invalidStart.Id, invalidEnd.Id );
+		invalidSpan.HasSpeedCurve = true;
+		invalidSpan.Speed = new MotionRateCurve
+		{
+			StartRate = -1,
+			EndRate = -1
+		};
+		Check(
+			report,
+			WeaponAnimationValidator.ValidateForGeneration( invalidDocument )
+				.Issues.Any( x => x.Code == "curve.speed_invalid" ),
+			"Zero-area speed curves must produce an explicit validation warning." );
+
+		var exportDocument = WeaponAnimationDocument.CreateDefault( "Curve export" );
+		var exportClip = exportDocument.GetSelectedClip()!;
+		exportClip.Duration = 1;
+		exportClip.SampleRate = 30;
+		exportClip.IsBindPoseSeed = false;
+		exportClip.Tracks.Clear();
+		var exportTrack = exportClip.EnsureTrack( "root" );
+		WeaponAnimationMath.UpsertKey(
+			exportTrack, 0, new Transform( Vector3.Zero ) );
+		WeaponAnimationMath.UpsertKey(
+			exportTrack, 1, new Transform( new Vector3( 8, 0, 0 ) ) );
+		CurveEditingService.ApplyPreset(
+			exportTrack,
+			[],
+			CurveEditorMode.Speed,
+			TransformCurveChannel.PositionX,
+			CurvePreset.EaseInOut );
+		var exportSkeleton = new HostSkeleton();
+		exportSkeleton.Add( new HostBone
+		{
+			Name = "root",
+			BindModelTransform = Transform.Zero
+		} );
+		var firstExport = SmdWriter.WriteClip(
+			exportDocument, exportSkeleton, exportClip );
+		var secondExport = SmdWriter.WriteClip(
+			exportDocument, exportSkeleton, exportClip );
+		Equal(
+			report,
+			firstExport,
+			secondExport,
+			"Customized curves must produce deterministic sampled SMD output." );
 	}
 
 	private static void TestFrameSnapping( WeaponAnimatorSelfTestReport report )

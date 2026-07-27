@@ -173,6 +173,30 @@ public static class WeaponAnimationValidator
 							$"{clip.Name}/{track.Target} has a key outside the clip duration.",
 							track.Target );
 				}
+
+				var keyIds = track.Keys.Select( x => x.Id ).ToHashSet();
+				foreach ( var span in track.CurveSpans )
+				{
+					if ( !keyIds.Contains( span.StartKeyId ) || !keyIds.Contains( span.EndKeyId ) )
+					{
+						report.Add(
+							ValidationSeverity.Warning,
+							"curve.span_orphan",
+							$"{clip.Name}/{track.Target} contains curve data for missing keys; it will be ignored.",
+							track.Target );
+						continue;
+					}
+
+					if ( span.HasSpeedCurve
+						&& WeaponAnimationMath.MotionRateArea( span.Speed ) <= 0.0001f )
+					{
+						report.Add(
+							ValidationSeverity.Warning,
+							"curve.speed_invalid",
+							$"{clip.Name}/{track.Target} has a zero-area speed curve and will use linear timing.",
+							track.Target );
+					}
+				}
 			}
 
 			foreach ( var track in clip.VisibilityTracks )

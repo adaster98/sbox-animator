@@ -12,12 +12,16 @@ internal sealed class TimelineEditorCanvas : Widget
 {
 	internal const float TrackHeaderWidth = 170;
 	internal const float GraphStartX = TrackHeaderWidth + 10;
+	internal const float CurveTrackListWidth = 205;
+	internal const float CurveAxisWidth = 52;
 	internal const float ScrollbarGutter = WeaponAnimatorTheme.ScrollbarGutter;
 	internal const float TrackHeight = 22;
 	private readonly WeaponAnimatorController _controller;
+	private readonly CurveEditorToolbar _curveToolbar;
 	private readonly TimelineRangeNavigator _navigator;
 	private readonly TimelineFrameRuler _ruler;
 	private readonly TimelineTrackArea _tracks;
+	private readonly CurveEditorArea _curves;
 
 	public TimelineEditorCanvas(
 		WeaponAnimatorController controller,
@@ -30,12 +34,20 @@ internal sealed class TimelineEditorCanvas : Widget
 		Layout.Spacing = 0;
 		SetStyles( "background-color: rgb(12,14,16); border: none;" );
 
+		_curveToolbar = new CurveEditorToolbar( this, this )
+		{
+			FixedHeight = 34,
+			Visible = false
+		};
 		_navigator = new TimelineRangeNavigator( this, this ) { FixedHeight = 22 };
 		_ruler = new TimelineFrameRuler( this, this ) { FixedHeight = 24 };
 		_tracks = new TimelineTrackArea( this, this );
+		_curves = new CurveEditorArea( this, this ) { Visible = false };
+		Layout.Add( _curveToolbar );
 		Layout.Add( _navigator );
 		Layout.Add( _ruler );
 		Layout.Add( _tracks, 1 );
+		Layout.Add( _curves, 1 );
 
 		_controller.DocumentChanged += Refresh;
 		_controller.PoseChanged += Refresh;
@@ -64,14 +76,21 @@ internal sealed class TimelineEditorCanvas : Widget
 			? default
 			: _controller.GetTimelineRange( Clip );
 
+	internal bool CurveMode => _controller.Document.Workspace.CurveEditorVisible;
+	internal float GraphLeft => CurveMode
+		? CurveTrackListWidth + CurveAxisWidth
+		: GraphStartX;
+
 	internal float BodyRight( float width ) =>
-		MathF.Max( GraphStartX + 1, width - ScrollbarGutter );
+		MathF.Max(
+			GraphLeft + 1,
+			CurveMode ? width : width - ScrollbarGutter );
 
 	internal float FrameToX( float frame, float width )
 	{
 		var range = VisibleRange;
-		var bodyWidth = MathF.Max( BodyRight( width ) - GraphStartX, 1 );
-		return GraphStartX
+		var bodyWidth = MathF.Max( BodyRight( width ) - GraphLeft, 1 );
+		return GraphLeft
 			+ (frame - range.StartFrame) / MathF.Max( range.Span, 1) * bodyWidth;
 	}
 
@@ -81,8 +100,8 @@ internal sealed class TimelineEditorCanvas : Widget
 		if ( clip is null )
 			return 0;
 		var range = VisibleRange;
-		var amount = (x - GraphStartX)
-			/ MathF.Max( BodyRight( width ) - GraphStartX, 1 );
+		var amount = (x - GraphLeft)
+			/ MathF.Max( BodyRight( width ) - GraphLeft, 1 );
 		return Math.Clamp(
 			(int)MathF.Round( range.StartFrame + amount * range.Span ),
 			0,
@@ -93,10 +112,10 @@ internal sealed class TimelineEditorCanvas : Widget
 	{
 		var clip = Clip;
 		if ( clip is null )
-			return GraphStartX;
-		return GraphStartX
+			return GraphLeft;
+		return GraphLeft
 			+ frame / TimelineInteraction.LastFrame( clip )
-			* MathF.Max( BodyRight( width ) - GraphStartX, 1 );
+			* MathF.Max( BodyRight( width ) - GraphLeft, 1 );
 	}
 
 	internal int FullXToFrame( float x, float width )
@@ -104,8 +123,8 @@ internal sealed class TimelineEditorCanvas : Widget
 		var clip = Clip;
 		if ( clip is null )
 			return 0;
-		var amount = (x - GraphStartX)
-			/ MathF.Max( BodyRight( width ) - GraphStartX, 1 );
+		var amount = (x - GraphLeft)
+			/ MathF.Max( BodyRight( width ) - GraphLeft, 1 );
 		return Math.Clamp(
 			(int)MathF.Round( amount * TimelineInteraction.LastFrame( clip ) ),
 			0,
@@ -128,14 +147,19 @@ internal sealed class TimelineEditorCanvas : Widget
 	internal void DrawLabelGutter( float height )
 	{
 		Paint.SetBrushAndPen( new Color( 0.086f, 0.094f, 0.104f ) );
-		Paint.DrawRect( new Rect( 0, 0, GraphStartX, height ) );
+		Paint.DrawRect( new Rect( 0, 0, GraphLeft, height ) );
 	}
 
 	private void Refresh()
 	{
+		_curveToolbar.Visible = CurveMode;
+		_tracks.Visible = !CurveMode;
+		_curves.Visible = CurveMode;
+		_curveToolbar.Refresh();
 		_navigator.Update();
 		_ruler.Update();
 		_tracks.Refresh();
+		_curves.Refresh();
 		Update();
 	}
 }
@@ -169,9 +193,9 @@ internal sealed class TimelineRangeNavigator : Widget
 
 		var bodyRight = _timeline.BodyRight( Width );
 		var rail = new Rect(
-			TimelineEditorCanvas.GraphStartX,
+			_timeline.GraphLeft,
 			5,
-			bodyRight - TimelineEditorCanvas.GraphStartX,
+			bodyRight - _timeline.GraphLeft,
 			12 );
 		Paint.SetBrushAndPen( WeaponAnimatorTheme.SurfaceRaised );
 		Paint.DrawRect( rail, 2 );
@@ -317,7 +341,7 @@ internal sealed class TimelineFrameRuler : Widget
 
 		var range = _timeline.VisibleRange;
 		var bodyWidth = MathF.Max(
-			_timeline.BodyRight( Width ) - TimelineEditorCanvas.GraphStartX,
+			_timeline.BodyRight( Width ) - _timeline.GraphLeft,
 			1 );
 		var spacing = TimelineInteraction.TickSpacing( bodyWidth / MathF.Max( range.Span, 1 ) );
 		var first = (int)MathF.Ceiling( range.StartFrame / (float)spacing.MinorFrames )
@@ -364,7 +388,7 @@ internal sealed class TimelineFrameRuler : Widget
 	protected override void OnMousePress( MouseEvent e )
 	{
 		if ( !e.LeftMouseButton
-			|| e.LocalPosition.x < TimelineEditorCanvas.GraphStartX
+			|| e.LocalPosition.x < _timeline.GraphLeft
 			|| e.LocalPosition.x > _timeline.BodyRight( Width ) )
 		{
 			base.OnMousePress( e );
@@ -413,7 +437,7 @@ internal sealed class TimelineFrameRuler : Widget
 		_timeline.Controller.SetTimelineFrame( _timeline.XToFrame( x, Width ) );
 
 	private bool IsGraphX( float x ) =>
-		x >= TimelineEditorCanvas.GraphStartX
+		x >= _timeline.GraphLeft
 		&& x <= _timeline.BodyRight( Width );
 }
 
@@ -475,10 +499,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 
 		ConfigureScrollbar();
 		DrawGrid( clip );
-		if (_timeline.Controller.Document.Workspace.CurveEditorVisible )
-			DrawCurves( clip );
-		else
-			DrawDopeSheet( clip );
+		DrawDopeSheet( clip );
 
 		var playheadFrame = TimelineInteraction.TimeToFrame(
 			_timeline.Controller.Document.Workspace.TimelineTime,
@@ -511,8 +532,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 	{
 		if ( !e.LeftMouseButton
 			|| _timeline.Clip is not { } clip
-			|| _timeline.Controller.Document.Workspace.CurveEditorVisible
-			|| e.LocalPosition.x < TimelineEditorCanvas.GraphStartX
+			|| e.LocalPosition.x < _timeline.GraphLeft
 			|| e.LocalPosition.x > _timeline.BodyRight( Width ) )
 		{
 			base.OnMousePress( e );
@@ -668,7 +688,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		base.OnScrollChanged();
 		if ( _restoringScroll
 			|| _timeline.Clip is not { } clip
-			|| _timeline.Controller.Document.Workspace.CurveEditorVisible )
+			|| _timeline.CurveMode )
 			return;
 		if ( _dragMode == TimelineGridDragMode.Marquee )
 		{
@@ -686,7 +706,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		var clip = _timeline.Clip;
 		if ( clip is null )
 			return;
-		var curves = _timeline.Controller.Document.Workspace.CurveEditorVisible;
+		var curves = _timeline.CurveMode;
 		var rowCount = curves ? 1 : TimelineRows( clip );
 		var maximum = Math.Max(
 			0,
@@ -713,7 +733,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 	{
 		var range = _timeline.VisibleRange;
 		var bodyWidth = MathF.Max(
-			_timeline.BodyRight( Width ) - TimelineEditorCanvas.GraphStartX,
+			_timeline.BodyRight( Width ) - _timeline.GraphLeft,
 			1 );
 		var spacing = TimelineInteraction.TickSpacing( bodyWidth / MathF.Max( range.Span, 1 ) );
 		var first = (int)MathF.Ceiling( range.StartFrame / (float)spacing.MinorFrames )
@@ -786,10 +806,10 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		{
 			var start = _timeline.FrameToX( span.StartTime * clip.SampleRate, Width );
 			var end = _timeline.FrameToX( span.EndTime * clip.SampleRate, Width );
-			if ( end < TimelineEditorCanvas.GraphStartX
+			if ( end < _timeline.GraphLeft
 				|| start > _timeline.BodyRight( Width ) )
 				continue;
-			start = MathF.Max( start, TimelineEditorCanvas.GraphStartX );
+			start = MathF.Max( start, _timeline.GraphLeft );
 			end = MathF.Min( end, _timeline.BodyRight( Width ) );
 			var color = span.Visible
 				? WeaponAnimatorTheme.Green
@@ -837,16 +857,16 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 			if ( tag.Kind == AnimationTagKind.Point && !IsGraphX( start ) )
 				continue;
 			if ( tag.Kind == AnimationTagKind.Range
-				&& (end < TimelineEditorCanvas.GraphStartX
+				&& (end < _timeline.GraphLeft
 					|| start > _timeline.BodyRight( Width )) )
 				continue;
 			start = Math.Clamp(
 				start,
-				TimelineEditorCanvas.GraphStartX,
+				_timeline.GraphLeft,
 				_timeline.BodyRight( Width ) );
 			end = Math.Clamp(
 				end,
-				TimelineEditorCanvas.GraphStartX,
+				_timeline.GraphLeft,
 				_timeline.BodyRight( Width ) );
 			Paint.SetBrushAndPen( WeaponAnimatorTheme.Green.WithAlpha( 0.65f ) );
 			if ( tag.Kind == AnimationTagKind.Point )
@@ -865,58 +885,6 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 						MathF.Max( end - start, 4 ),
 						TimelineEditorCanvas.TrackHeight - 10 ),
 					2 );
-		}
-	}
-
-	private void DrawCurves( WeaponAnimationClip clip )
-	{
-		var tracks = clip.Tracks.Where( x => x.Keys.Count > 0 ).Take( 3 ).ToArray();
-		if ( tracks.Length == 0 )
-			return;
-		var graph = new Rect(
-			TimelineEditorCanvas.GraphStartX,
-			0,
-			_timeline.BodyRight( Width ) - TimelineEditorCanvas.GraphStartX,
-			Height );
-		var values = tracks.SelectMany( x => x.Keys ).SelectMany( x =>
-			new[] { x.Position.x, x.Position.y, x.Position.z } ).ToArray();
-		var minimum = values.DefaultIfEmpty( -1 ).Min();
-		var maximum = values.DefaultIfEmpty( 1 ).Max();
-		if ( MathF.Abs( maximum - minimum ) < 0.001f )
-		{
-			minimum -= 1;
-			maximum += 1;
-		}
-
-		for ( var index = 0; index < tracks.Length; index++ )
-		{
-			var track = tracks[index];
-			Paint.SetPen( TrackColor( track.Kind ), 1.5f );
-			Paint.DrawText(
-				new Rect(
-					8,
-					index * 20,
-					TimelineEditorCanvas.TrackHeaderWidth - 12,
-					20 ),
-				track.Target,
-				TextFlag.LeftCenter );
-			Vector2? previous = null;
-			foreach ( var key in track.Keys.OrderBy( x => x.Time ) )
-			{
-				var point = new Vector2(
-					_timeline.FrameToX( key.Time * clip.SampleRate, Width ),
-					graph.Bottom - (key.Position.x - minimum)
-						/ (maximum - minimum) * graph.Height );
-				if ( !IsGraphX( point.x ) )
-				{
-					previous = null;
-					continue;
-				}
-				if ( previous is not null )
-					Paint.DrawLine( previous.Value, point );
-				Paint.DrawCircle( point, 3 );
-				previous = point;
-			}
 		}
 	}
 
@@ -1028,7 +996,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 			_dragPosition.x,
 			_marqueeDragContentY,
 			VerticalScrollbar.Value,
-			TimelineEditorCanvas.GraphStartX,
+			_timeline.GraphLeft,
 			_timeline.BodyRight( Width ) );
 		return new Rect(
 			bounds.Left,
@@ -1052,7 +1020,7 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		&& point.y <= rect.Bottom;
 
 	private bool IsGraphX( float x ) =>
-		x >= TimelineEditorCanvas.GraphStartX
+		x >= _timeline.GraphLeft
 		&& x <= _timeline.BodyRight( Width );
 
 	private static Color TrackColor( RigControlKind kind ) => kind switch

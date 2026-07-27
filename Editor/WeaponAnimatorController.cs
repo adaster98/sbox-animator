@@ -344,6 +344,192 @@ public sealed class WeaponAnimatorController
 		TimelineViewChanged?.Invoke();
 	}
 
+	internal void SetCurveEditorVisible( bool visible )
+	{
+		if ( Document.Workspace.CurveEditorVisible == visible )
+			return;
+		Document.Workspace.CurveEditorVisible = visible;
+		if ( visible && Document.GetSelectedClip() is { } clip )
+			CurveEditingService.ResolveSelectedTrack( Document, clip );
+		LastAction = visible ? "Open curve editor" : "Open key editor";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SelectCurveTrack( WeaponAnimationClip clip, Guid trackId )
+	{
+		var track = clip.Tracks.FirstOrDefault( x => x.Id == trackId && x.Keys.Count > 0 );
+		if ( track is null )
+			return;
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		if ( view.SelectedTrackId == trackId )
+			return;
+		view.SelectedTrackId = trackId;
+		view.VisibleChannels = CurveEditingService.DefaultVisibleChannels( track );
+		view.HasVerticalRange = false;
+		if ( !track.Target.StartsWith( "@", StringComparison.Ordinal ) )
+		{
+			Document.Workspace.SelectedBone = track.Target;
+			Document.Workspace.SelectedControl = "";
+		}
+		else
+		{
+			Document.Workspace.SelectedControl = track.Target;
+			Document.Workspace.SelectedBone = "";
+		}
+		LastAction = $"Curve track {track.Target}";
+		SetDirty( true );
+		SelectionChanged?.Invoke();
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SetCurveMode( WeaponAnimationClip clip, CurveEditorMode mode )
+	{
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		if ( view.Mode == mode )
+			return;
+		view.Mode = mode;
+		view.HasVerticalRange = false;
+		LastAction = $"Curve mode {mode}";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SetCurveChannels(
+		WeaponAnimationClip clip,
+		TransformCurveChannel channels )
+	{
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		channels &= TransformCurveChannel.All;
+		if ( channels == TransformCurveChannel.None || view.VisibleChannels == channels )
+			return;
+		view.VisibleChannels = channels;
+		view.HasVerticalRange = false;
+		LastAction = "Curve channels";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SetCurveSearch( WeaponAnimationClip clip, string search )
+	{
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		search ??= "";
+		if ( view.Search == search )
+			return;
+		view.Search = search;
+		view.TrackScroll = 0;
+		LastAction = "Curve search";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SetCurveTrackScroll( WeaponAnimationClip clip, float value )
+	{
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		value = MathF.Max( value, 0 );
+		if ( MathF.Abs( view.TrackScroll - value ) <= 0.5f )
+			return;
+		view.TrackScroll = value;
+		LastAction = "Curve track scroll";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void SetCurveVerticalRange(
+		WeaponAnimationClip clip,
+		float minimum,
+		float maximum )
+	{
+		if ( !WeaponAnimationMath.IsFinite( minimum )
+			|| !WeaponAnimationMath.IsFinite( maximum )
+			|| maximum - minimum < 0.0001f )
+			return;
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		view.HasVerticalRange = true;
+		view.VerticalMinimum = minimum;
+		view.VerticalMaximum = maximum;
+		LastAction = "Curve vertical range";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void FitCurveVerticalRange( WeaponAnimationClip clip )
+	{
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		if ( !view.HasVerticalRange )
+			return;
+		view.HasVerticalRange = false;
+		LastAction = "Fit curves";
+		SetDirty( true );
+		TimelineViewChanged?.Invoke();
+	}
+
+	internal void ApplyCurvePreset( CurvePreset preset )
+	{
+		var clip = Document.GetSelectedClip();
+		var track = clip is null
+			? null
+			: CurveEditingService.ResolveSelectedTrack( Document, clip );
+		if ( clip is null || track is null || track.Keys.Count < 2 )
+			return;
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		Mutate( $"Curve {preset}", _ =>
+		{
+			IdleBindPoseService.MarkAuthored( clip );
+			CurveEditingService.ApplyPreset(
+				track,
+				_selectedKeys,
+				view.Mode,
+				view.VisibleChannels,
+				preset );
+			CurveEditingService.RepairTrack( track );
+		} );
+	}
+
+	internal void AlignSelectedCurveHandles()
+		=> SetSelectedCurveHandleMode( CurveHandleMode.Aligned );
+
+	internal void SetSelectedCurveHandleMode( CurveHandleMode mode )
+	{
+		var clip = Document.GetSelectedClip();
+		var track = clip is null
+			? null
+			: CurveEditingService.ResolveSelectedTrack( Document, clip );
+		if ( clip is null || track is null )
+			return;
+		var view = Document.Workspace.EnsureCurveView( clip.Id );
+		var keys = track.Keys.Where( x => _selectedKeys.Contains( x.Id ) ).ToArray();
+		if ( keys.Length == 0 )
+			return;
+		Mutate(
+			mode == CurveHandleMode.Aligned
+				? "Align curve handles"
+				: "Free curve handles",
+			_ =>
+		{
+			if ( view.Mode == CurveEditorMode.Speed )
+			{
+				foreach ( var span in track.CurveSpans.Where( x => x.HasSpeedCurve ) )
+				{
+					if ( _selectedKeys.Contains( span.StartKeyId ) )
+						span.Speed.StartHandleMode = mode;
+					if ( _selectedKeys.Contains( span.EndKeyId ) )
+						span.Speed.EndHandleMode = mode;
+				}
+			}
+			else
+			{
+				foreach ( var key in keys )
+				{
+					if ( mode == CurveHandleMode.Aligned )
+						CurveEditingService.AlignHandles( key, view.VisibleChannels );
+					else
+						CurveEditingService.FreeHandles( key, view.VisibleChannels );
+				}
+			}
+		} );
+	}
+
 	public void SelectKeys( IEnumerable<Guid> keyIds, bool additive )
 	{
 		if ( !additive )
@@ -418,6 +604,24 @@ public sealed class WeaponAnimatorController
 		EndContinuousEdit();
 	}
 
+	internal void EndCurvePointMove()
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is not null )
+		{
+			UpdateContinuousEdit( _ =>
+			{
+				RemoveKeyCollisions( clip );
+				foreach ( var track in clip.Tracks )
+				{
+					track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+					CurveEditingService.RepairTrack( track );
+				}
+			} );
+		}
+		EndContinuousEdit();
+	}
+
 	public void CopySelectedKeys()
 	{
 		var clip = Document.GetSelectedClip();
@@ -447,7 +651,12 @@ public sealed class WeaponAnimatorController
 				Target = track.Target,
 				Kind = track.Kind,
 				Interpolation = track.Interpolation,
-				Keys = keys
+				Keys = keys,
+				CurveSpans = track.CurveSpans
+					.Where( x =>
+						_selectedKeys.Contains( x.StartKeyId )
+						&& _selectedKeys.Contains( x.EndKeyId ) )
+					.ToList()
 			} );
 		}
 
@@ -493,11 +702,15 @@ public sealed class WeaponAnimatorController
 				var targetTrack = clip.EnsureTrack( sourceTrack.Target );
 				targetTrack.Kind = sourceTrack.Kind;
 				targetTrack.Interpolation = sourceTrack.Interpolation;
+				var previousOrder = CurveEditingService.CaptureOrder( targetTrack );
 
+				var remappedKeys = new Dictionary<Guid, Guid>();
 				foreach ( var sourceKey in sourceTrack.Keys )
 				{
 					var key = Json.Deserialize<TransformKey>( Json.Serialize( sourceKey ) )!;
+					var sourceId = key.Id;
 					key.Id = Guid.NewGuid();
+					remappedKeys[sourceId] = key.Id;
 					key.Time = TimelineInteraction.SnapTime(
 						clip,
 						pasteTime + sourceKey.Time - payload.Origin );
@@ -505,7 +718,29 @@ public sealed class WeaponAnimatorController
 					_selectedKeys.Add( key.Id );
 				}
 
+				var pastedFrames = targetTrack.Keys
+					.Where( x => _selectedKeys.Contains( x.Id ) )
+					.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
+					.ToHashSet();
+				targetTrack.Keys.RemoveAll( x =>
+					!_selectedKeys.Contains( x.Id )
+					&& pastedFrames.Contains(
+						TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) ) );
+
+				foreach ( var sourceSpan in sourceTrack.CurveSpans )
+				{
+					if ( !remappedKeys.TryGetValue( sourceSpan.StartKeyId, out var startId )
+						|| !remappedKeys.TryGetValue( sourceSpan.EndKeyId, out var endId ) )
+						continue;
+					var span = Json.Deserialize<TransformCurveSpan>(
+						Json.Serialize( sourceSpan ) )!;
+					span.Id = Guid.NewGuid();
+					span.StartKeyId = startId;
+					span.EndKeyId = endId;
+					targetTrack.CurveSpans.Add( span );
+				}
 				targetTrack.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+				CurveEditingService.RepairTopology( targetTrack, previousOrder );
 			}
 
 			foreach ( var sourceTrack in payload.VisibilityTracks )
@@ -541,7 +776,11 @@ public sealed class WeaponAnimatorController
 		{
 			IdleBindPoseService.MarkAuthored( clip );
 			foreach ( var track in clip.Tracks )
-				track.Keys.RemoveAll( x => _selectedKeys.Contains( x.Id ) );
+			{
+				CurveEditingService.RemoveKeysAndRepair(
+					track,
+					x => _selectedKeys.Contains( x.Id ) );
+			}
 			foreach ( var track in clip.VisibilityTracks )
 				track.Keys.RemoveAll( x => _selectedKeys.Contains( x.Id ) );
 			_selectedKeys.Clear();
@@ -586,6 +825,7 @@ public sealed class WeaponAnimatorController
 			var track = clip.EnsureTrack( target );
 			track.Kind = kind;
 			var key = WeaponAnimationMath.UpsertKey( track, snapped, value );
+			CurveEditingService.RepairTrack( track );
 			Document.Workspace.RemoveWorkingPose( clip.Id, target );
 			_selectedKeys.Clear();
 			_selectedKeys.Add( key.Id );
@@ -638,6 +878,7 @@ public sealed class WeaponAnimatorController
 			var track = clip.EnsureTrack( target );
 			track.Kind = kind;
 			WeaponAnimationMath.UpsertKey( track, snapped, value );
+			CurveEditingService.RepairTrack( track );
 			document.Workspace.RemoveWorkingPose( clip.Id, target );
 			clip.Readiness = clip.Role == WeaponClipRole.Idle
 				? ClipReadiness.Ready
@@ -860,7 +1101,10 @@ public sealed class WeaponAnimatorController
 		}
 
 		foreach ( var track in clip.Tracks )
+		{
 			track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+			CurveEditingService.RepairTrack( track );
+		}
 		foreach ( var track in clip.VisibilityTracks )
 			track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
 	}
@@ -869,6 +1113,7 @@ public sealed class WeaponAnimatorController
 	{
 		foreach ( var track in clip.Tracks )
 		{
+			var previousOrder = CurveEditingService.CaptureOrder( track );
 			var occupied = track.Keys
 				.Where( x => _selectedKeys.Contains( x.Id ) )
 				.Select( x => TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) )
@@ -877,6 +1122,7 @@ public sealed class WeaponAnimatorController
 				!_selectedKeys.Contains( x.Id )
 				&& occupied.Contains(
 					TimelineInteraction.TimeToFrame( x.Time, clip.SampleRate ) ) );
+			CurveEditingService.RepairTopology( track, previousOrder );
 		}
 
 		foreach ( var track in clip.VisibilityTracks )
@@ -920,6 +1166,7 @@ public sealed class WeaponAnimatorController
 		public RigControlKind Kind { get; set; }
 		public TrackInterpolation Interpolation { get; set; }
 		public List<TransformKey> Keys { get; set; } = [];
+		public List<TransformCurveSpan> CurveSpans { get; set; } = [];
 	}
 
 	private sealed class ClipboardVisibilityTrack
