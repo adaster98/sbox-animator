@@ -195,6 +195,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		edit.AddOption( "Cut Keys", "content_cut", _controller.CutSelectedKeys );
 		edit.AddOption( "Copy Keys", "content_copy", _controller.CopySelectedKeys );
 		edit.AddOption( "Paste Keys", "content_paste", _controller.PasteKeys );
+		edit.AddOption( "Delete Keys", "delete", _controller.DeleteSelectedKeys );
 		edit.AddSeparator();
 		edit.AddOption( "Preferences…", "tune", OpenPreferences );
 

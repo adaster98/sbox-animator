@@ -1159,6 +1159,7 @@ public sealed class AnimationTimelinePanel : Widget
 		left.Layout.Add( CompactAction( "Add key", "key", AddKey, left, true ) );
 		left.Layout.Add( CompactAction( "Copy", "content_copy", _controller.CopySelectedKeys, left ) );
 		left.Layout.Add( CompactAction( "Paste", "content_paste", _controller.PasteKeys, left ) );
+		left.Layout.Add( CompactAction( "Delete", "delete", _controller.DeleteSelectedKeys, left ) );
 		left.Layout.Add( CompactAction( "Mirror", "flip", _controller.MirrorSelectedKeys, left ) );
 		left.Layout.Add( CompactAction(
 			"Curves",

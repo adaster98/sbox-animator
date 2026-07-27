@@ -1401,6 +1401,45 @@ public static class WeaponAnimatorSelfTests
 			3,
 			clip.EnsureTrack( "weapon_root" ).Keys.Count,
 			"A complete key drag must undo as one action." );
+
+		var deleteDocument = WeaponAnimationDocument.CreateDefault( "Timeline key delete" );
+		var deleteClip = deleteDocument.GetSelectedClip()!;
+		var deleteTransformKey = WeaponAnimationMath.UpsertKey(
+			deleteClip.EnsureTrack( "weapon_root" ),
+			0,
+			Transform.Zero );
+		var visibilityPart = new WeaponVisibilityPart { Name = "Magazine" };
+		deleteDocument.Rig.VisibilityParts.Add( visibilityPart );
+		var deleteVisibilityKey = new VisibilityKey { Time = 0, Visible = false };
+		deleteClip.EnsureVisibilityTrack( visibilityPart.Id ).Keys.Add( deleteVisibilityKey );
+		var deleteController = new WeaponAnimatorController();
+		deleteController.SetDocument( deleteDocument );
+		deleteController.SetSelectedKeys( [deleteTransformKey.Id, deleteVisibilityKey.Id] );
+		deleteController.DeleteSelectedKeys();
+		deleteClip = deleteController.Document.GetSelectedClip()!;
+		Equal(
+			report,
+			0,
+			deleteClip.Tracks.SelectMany( x => x.Keys ).Count(),
+			"Deleting selected keys must remove transform keys." );
+		Equal(
+			report,
+			0,
+			deleteClip.VisibilityTracks.SelectMany( x => x.Keys ).Count(),
+			"Deleting selected keys must remove visibility keys." );
+		Equal(
+			report,
+			0,
+			deleteController.SelectedKeys.Count,
+			"Deleting keys must clear the stale key selection." );
+		deleteController.Undo();
+		deleteClip = deleteController.Document.GetSelectedClip()!;
+		Equal(
+			report,
+			2,
+			deleteClip.Tracks.SelectMany( x => x.Keys ).Count()
+				+ deleteClip.VisibilityTracks.SelectMany( x => x.Keys ).Count(),
+			"Deleting a mixed key selection must undo as one action." );
 	}
 
 	private static void TestTimelinePlayback( WeaponAnimatorSelfTestReport report )

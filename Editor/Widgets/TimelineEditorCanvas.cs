@@ -445,10 +445,17 @@ internal sealed class TimelineTrackArea : BaseScrollWidget
 		_timeline = timeline;
 		MinimumSize = new Vector2( 320, 72 );
 		MouseTracking = true;
+		FocusMode = FocusMode.Click;
 		HorizontalScrollbarMode = ScrollbarMode.Off;
 		VerticalScrollbarMode = ScrollbarMode.Auto;
 		SetStyles( "background-color: rgb(12,14,16); border: none;" );
 	}
+
+	[Shortcut( "weaponanim.timeline.delete", "DEL" )]
+	private void ShortcutDelete() => _timeline.Controller.DeleteSelectedKeys();
+
+	[Shortcut( "weaponanim.timeline.backspace", "BACKSPACE" )]
+	private void ShortcutBackspace() => _timeline.Controller.DeleteSelectedKeys();
 
 	public void Refresh()
 	{
