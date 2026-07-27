@@ -100,6 +100,7 @@ public static class SequenceImportService
 
 		clip.Tracks.RemoveAll( x => x.Kind == RigControlKind.Weapon );
 		clip.Tracks.AddRange( tracks.Values.Where( x => x.Keys.Count > 0 ) );
+		clip.VisibilityTracks.Clear();
 		clip.Duration = duration;
 		clip.ImportedSequence = sequenceName;
 		clip.Readiness = clip.Role == WeaponClipRole.Idle

@@ -64,6 +64,7 @@ public static class IdleBindPoseService
 		if ( document.Clips.Where( x => x.Id != idle.Id ).Any( HasAuthoredContent )
 			|| idle.Constraints.Count > 0
 			|| idle.Tags.Count > 0
+			|| idle.VisibilityTracks.Any( x => x.Keys.Count > 0 )
 			|| idle.ParameterEvents.Count > 0
 			|| !string.IsNullOrWhiteSpace( idle.ImportedSequence )
 			|| document.Workspace.WorkingPoseOverrides.Count > 0
@@ -89,6 +90,7 @@ public static class IdleBindPoseService
 
 	private static bool HasAuthoredContent( WeaponAnimationClip clip ) =>
 		clip.Tracks.Any( x => x.Keys.Count > 0 )
+		|| clip.VisibilityTracks.Any( x => x.Keys.Count > 0 )
 		|| clip.Constraints.Count > 0
 		|| clip.Tags.Count > 0
 		|| clip.ParameterEvents.Count > 0

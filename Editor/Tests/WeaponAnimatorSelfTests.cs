@@ -38,6 +38,7 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "generated Idle recovery", TestGeneratedIdleRecovery );
 		Run( report, "selection field isolation", TestSelectionFieldIsolation );
 		Run( report, "working pose and auto-key", TestWorkingPose );
+		Run( report, "stepped part visibility", TestPartVisibility );
 		Run( report, "schema migration", TestSchemaMigration );
 		Run( report, "content-sized buttons", TestContentSizedButtons );
 		Run( report, "alignment", TestAlignment );
@@ -1518,6 +1519,98 @@ public static class WeaponAnimatorSelfTests
 			"Missing action clips must use Idle sequence fallbacks." );
 		Check( report, graph.Contains( "m_name = \"b_attack\"" ), "Facepunch firearm parameters must be exposed." );
 		Check( report, graph.Contains( "m_name = \"reload_increment\"" ), "Standard reload tags must be declared." );
+	}
+
+	private static void TestPartVisibility( WeaponAnimatorSelfTestReport report )
+	{
+		var document = ValidDocument();
+		var idle = document.EnsureClip( WeaponClipRole.Idle );
+		var part = new WeaponVisibilityPart
+		{
+			Name = "Spare Magazine",
+			BoneId = "weapon_root",
+			BoneName = "weapon_root",
+			DefaultVisible = false
+		};
+		document.Rig.VisibilityParts.Add( part );
+		var track = idle.EnsureVisibilityTrack( part.Id );
+		var show = WeaponVisibilityEvaluator.UpsertKey( track, 0.2f, true );
+		WeaponVisibilityEvaluator.UpsertKey( track, 0.8f, false );
+
+		Check(
+			report,
+			!WeaponVisibilityEvaluator.Evaluate( part, idle, 0.1f )
+				&& WeaponVisibilityEvaluator.Evaluate( part, idle, 0.5f )
+				&& !WeaponVisibilityEvaluator.Evaluate( part, idle, 0.9f ),
+			"Visibility tracks must evaluate as stepped state changes from the configured default." );
+		var replacement = WeaponVisibilityEvaluator.UpsertKey( track, 0.2f, false );
+		Equal(
+			report,
+			show.Id,
+			replacement.Id,
+			"Keying visibility twice at one frame must update the existing key." );
+		Check(
+			report,
+			!WeaponVisibilityEvaluator.Evaluate( part, idle, 0.5f ),
+			"A replaced visibility key must take effect immediately." );
+		replacement.Visible = true;
+
+		var spans = WeaponVisibilityEvaluator.BuildSpans( part, idle );
+		Equal( report, 3, spans.Count, "Visibility export must cover the full clip with deterministic state spans." );
+		Near( report, 0, spans[0].StartTime, 0.0001f, "The first visibility span must begin at clip start." );
+		Near( report, idle.Duration, spans[^1].EndTime, 0.0001f, "The final visibility span must reach clip end." );
+
+		var skeleton = HostSkeletonBuilder.Build( document, includeArmProfile: false );
+		var before = SmdWriter.WriteClip( document, skeleton, idle );
+		var graph = AnimGraphWriter.Write( document, "host.vmdl" );
+		var after = SmdWriter.WriteClip( document, skeleton, idle );
+		Equal(
+			report,
+			before,
+			after,
+			"Visibility authoring must not alter exported skeletal transforms." );
+		Check(
+			report,
+			graph.Contains( WeaponVisibilityEvaluator.VisibleTag( part.Id ) )
+				&& graph.Contains( WeaponVisibilityEvaluator.HiddenTag( part.Id ) ),
+			"Generated AnimGraphs must declare both visibility states for every part." );
+
+		var prefab = PrefabWriter.Write( document, "host.vmdl", "weapon.vmdl" );
+		Check(
+			report,
+			prefab.Contains( "SboxWeaponAnimator.WeaponPartVisibilityController" )
+				&& prefab.Contains( "\"UseAnimGraphTags\": true" )
+				&& prefab.Contains( part.Id.ToString(), StringComparison.OrdinalIgnoreCase ),
+			"Generated prefabs must contain the runtime visibility controller and authored part metadata." );
+		document.Output.GenerateGraph = false;
+		var graphFreePrefab = PrefabWriter.Write( document, "host.vmdl", "weapon.vmdl" );
+		Check(
+			report,
+			graphFreePrefab.Contains( "\"UseAnimGraphTags\": false" )
+				&& graphFreePrefab.Contains( "\"SequenceName\": \"idle\"" ),
+			"Graph-free prefabs must serialize direct sequence visibility playback data." );
+		document.Output.GenerateGraph = true;
+
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+		controller.SetTimelineTime( 0.2f );
+		controller.SelectKeys( [show.Id], false );
+		controller.CopySelectedKeys();
+		controller.SetTimelineTime( 0.5f );
+		controller.PasteKeys();
+		Check(
+			report,
+			idle.VisibilityTracks.Single( x => x.PartId == part.Id )
+				.Keys.Any( x => MathF.Abs( x.Time - 0.5f ) <= 0.0001f ),
+			"Visibility keys must participate in the shared copy and paste workflow." );
+
+		part.RenderMode = VisibilityRenderMode.BodyGroup;
+		part.BodyGroupName = "";
+		var invalid = WeaponAnimationValidator.ValidateForGeneration( document );
+		Check(
+			report,
+			invalid.Issues.Any( x => x.Code == "visibility.bodygroup_missing" ),
+			"Generation validation must reject an unnamed bodygroup channel." );
 	}
 
 	private static WeaponAnimationDocument ValidDocument()

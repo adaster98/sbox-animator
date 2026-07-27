@@ -119,6 +119,7 @@ public sealed class RigBrowserPanel : Widget
 		}
 
 		RefreshSelection( reveal: false );
+		UpdateControlLabels();
 	}
 
 	private void AddControlGroup()
@@ -358,6 +359,16 @@ public sealed class RigBrowserPanel : Widget
 			if ( _itemButtons.TryGetValue( item.Key, out var button ) )
 				button.Text = item.Value;
 		}
+
+		foreach ( var bone in HostSkeletonBuilder.Build( _controller.Document )
+			.Bones.Where( x => x.IsWeaponBone ) )
+		{
+			if ( !_itemButtons.TryGetValue( bone.Name, out var button ) )
+				continue;
+			button.Icon = _controller.GetVisibilityPart( bone.Name ) is null
+				? ""
+				: "visibility";
+		}
 	}
 
 	internal static string StructureSignature( HostSkeleton skeleton ) =>
@@ -369,7 +380,7 @@ public sealed class RigBrowserPanel : Widget
 	private static string BoundText( RigTarget target ) => target.IsBound ? "bound" : "unbound";
 }
 
-public sealed class SelectedControlInspectorPanel : Widget
+public sealed partial class SelectedControlInspectorPanel : Widget
 {
 	private readonly WeaponAnimatorController _controller;
 	private readonly Label _type;
@@ -621,6 +632,8 @@ public sealed class SelectedControlInspectorPanel : Widget
 					actions ) );
 			}
 			_transform.Layout.Add( actions );
+			if ( context.Kind == RigControlKind.Weapon )
+				AddVisibilityEditor( context );
 			Refresh();
 		}
 		finally

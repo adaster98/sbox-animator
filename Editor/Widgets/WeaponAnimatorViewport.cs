@@ -1038,7 +1038,78 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					_sourceRenderer.WorldTransform.ToLocal( transform ) );
 			}
 		}
+		ApplyPreviewVisibility();
 		LogSourcePoseDiagnostics( pose );
+	}
+
+	private void ApplyPreviewVisibility()
+	{
+		if ( !_sourceRenderer.IsValid() )
+			return;
+
+		var document = _controller.Document;
+		var clip = document.GetSelectedClip();
+		foreach ( var part in document.Rig.VisibilityParts )
+		{
+			var visible = WeaponVisibilityEvaluator.Evaluate(
+				part,
+				clip,
+				document.Workspace.TimelineTime );
+			if ( part.RenderMode == VisibilityRenderMode.BodyGroup )
+			{
+				if ( string.IsNullOrWhiteSpace( part.BodyGroupName )
+					|| !_sourceRenderer!.HasBodyGroups )
+					continue;
+				try
+				{
+					_sourceRenderer.SetBodyGroup(
+						part.BodyGroupName,
+						visible
+							? part.VisibleBodyGroupValue
+							: part.HiddenBodyGroupValue );
+				}
+				catch ( Exception ex )
+				{
+					Log.Warning(
+						$"[Weapon Animator] preview bodygroup '{part.BodyGroupName}' failed: {ex.Message}" );
+				}
+				continue;
+			}
+
+			if ( !string.IsNullOrWhiteSpace( part.BodyGroupName )
+				&& _sourceRenderer!.HasBodyGroups )
+			{
+				try
+				{
+					_sourceRenderer.SetBodyGroup(
+						part.BodyGroupName,
+						part.VisibleBodyGroupValue );
+				}
+				catch
+				{
+					// Switching back to bone mode should not leave the old bodygroup hidden.
+				}
+			}
+			if ( visible || string.IsNullOrWhiteSpace( part.BoneName ) )
+				continue;
+			var root = _sourceRenderer!.Model.Bones.GetBone( part.BoneName );
+			if ( root is null )
+				continue;
+
+			var collapsed = new Transform(
+				Vector3.Down * 4000.0f,
+				Rotation.Identity,
+				Vector3.One * 0.001f );
+			var queue = new Queue<BoneCollection.Bone>();
+			queue.Enqueue( root );
+			while ( queue.Count > 0 )
+			{
+				var bone = queue.Dequeue();
+				_sourceRenderer.SetBoneTransform( bone, collapsed );
+				foreach ( var child in bone.Children )
+					queue.Enqueue( child );
+			}
+		}
 	}
 
 	private void ApplyArmPoseToRenderer( EvaluatedPose pose )

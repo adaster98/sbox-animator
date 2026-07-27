@@ -443,6 +443,7 @@ public sealed class ClipRackPanel : Widget
 		_controller.Mutate( $"Start {clip.Name}", document =>
 		{
 			document.Workspace.ClearWorkingPoses( clip.Id );
+			clip.VisibilityTracks.Clear();
 			var skeleton = HostSkeletonBuilder.Build( document );
 			if ( clip.Role == WeaponClipRole.Idle )
 			{
@@ -497,6 +498,7 @@ public sealed class ClipRackPanel : Widget
 			destination.AllowSubframeKeys = copy.AllowSubframeKeys;
 			destination.IsBindPoseSeed = false;
 			destination.Tracks = copy.Tracks;
+			destination.VisibilityTracks = copy.VisibilityTracks;
 			destination.Constraints = copy.Constraints;
 			destination.Tags = copy.Tags;
 			destination.Readiness = ClipReadiness.Draft;
@@ -1343,9 +1345,11 @@ internal sealed class TimelineCanvas : Widget
 		var hit = HitKey( clip, e.LocalPosition );
 		if ( hit is not null )
 		{
-			_controller.SelectKeys( [hit.Id], e.HasCtrl || e.HasShift );
-			_dragStartTimes = clip.Tracks
-				.SelectMany( x => x.Keys )
+			_controller.SelectKeys( [hit.Value], e.HasCtrl || e.HasShift );
+			_dragStartTimes = clip.Tracks.SelectMany( x => x.Keys )
+				.Select( x => (x.Id, x.Time) )
+				.Concat( clip.VisibilityTracks.SelectMany( x => x.Keys )
+					.Select( x => (x.Id, x.Time) ) )
 				.Where( x => _controller.SelectedKeys.Contains( x.Id ) )
 				.ToDictionary( x => x.Id, x => x.Time );
 		}
@@ -1397,18 +1401,37 @@ internal sealed class TimelineCanvas : Widget
 					0,
 					clip.Duration );
 			}
+			foreach ( var key in clip.VisibilityTracks.SelectMany( x => x.Keys ) )
+			{
+				if ( !starts.TryGetValue( key.Id, out var start ) )
+					continue;
+				key.Time = Math.Clamp(
+					WeaponAnimationMath.SnapTime(
+						start + delta,
+						clip.SampleRate,
+						clip.AllowSubframeKeys ),
+					0,
+					clip.Duration );
+			}
 			foreach ( var track in clip.Tracks )
+				track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+			foreach ( var track in clip.VisibilityTracks )
 				track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
 		} );
 	}
 
 	private void DrawDopeSheet( WeaponAnimationClip clip )
 	{
-		var tracks = clip.Tracks.Take( Math.Max( 1, (int)((Height - RulerHeight) / TrackHeight) - 1 ) ).ToArray();
+		var capacity = Math.Max( 1, (int)((Height - RulerHeight) / TrackHeight) - 1 );
+		var parts = _controller.Document.Rig.VisibilityParts.Take( capacity ).ToArray();
+		for ( var i = 0; i < parts.Length; i++ )
+			DrawVisibilityRow( clip, parts[i], i );
+
+		var tracks = clip.Tracks.Take( Math.Max( 0, capacity - parts.Length ) ).ToArray();
 		for ( var i = 0; i < tracks.Length; i++ )
 		{
 			var track = tracks[i];
-			var y = RulerHeight + i * TrackHeight;
+			var y = RulerHeight + (parts.Length + i) * TrackHeight;
 			Paint.SetBrushAndPen( i % 2 == 0
 				? Color.White.WithAlpha( 0.018f )
 				: Color.Transparent );
@@ -1434,7 +1457,7 @@ internal sealed class TimelineCanvas : Widget
 			}
 		}
 
-		var tagY = RulerHeight + tracks.Length * TrackHeight;
+		var tagY = RulerHeight + (parts.Length + tracks.Length) * TrackHeight;
 		Paint.SetPen( WeaponAnimatorTheme.Muted );
 		Paint.DrawText( new Rect( 8, tagY, TrackHeaderWidth - 12, TrackHeight ), "TAGS", TextFlag.LeftCenter );
 		foreach ( var tag in clip.Tags )
@@ -1446,6 +1469,62 @@ internal sealed class TimelineCanvas : Widget
 				Paint.DrawRect( new Rect( start - 2, tagY + 4, 4, TrackHeight - 8 ), 1 );
 			else
 				Paint.DrawRect( new Rect( start, tagY + 5, MathF.Max( end - start, 4 ), TrackHeight - 10 ), 2 );
+		}
+	}
+
+	private void DrawVisibilityRow(
+		WeaponAnimationClip clip,
+		WeaponVisibilityPart part,
+		int index )
+	{
+		var y = RulerHeight + index * TrackHeight;
+		Paint.SetBrushAndPen( index % 2 == 0
+			? Color.White.WithAlpha( 0.018f )
+			: Color.Transparent );
+		Paint.DrawRect( new Rect( 0, y, Width, TrackHeight ) );
+		Paint.SetPen( WeaponAnimatorTheme.Amber );
+		Paint.DrawText(
+			new Rect( 8, y, TrackHeaderWidth - 12, TrackHeight ),
+			$"◉  {part.Name}",
+			TextFlag.LeftCenter );
+
+		foreach ( var span in WeaponVisibilityEvaluator.BuildSpans( part, clip ) )
+		{
+			var start = TimeToX( span.StartTime, clip.Duration );
+			var end = TimeToX( span.EndTime, clip.Duration );
+			var color = span.Visible
+				? WeaponAnimatorTheme.Green
+				: WeaponAnimatorTheme.Coral;
+			Paint.SetBrushAndPen( color.WithAlpha( span.Visible ? 0.28f : 0.24f ) );
+			Paint.DrawRect(
+				new Rect(
+					start,
+					y + 4,
+					MathF.Max( end - start, 1 ),
+					TrackHeight - 8 ),
+				2 );
+		}
+
+		var track = clip.VisibilityTracks.FirstOrDefault( x => x.PartId == part.Id );
+		if ( track is null )
+			return;
+		foreach ( var key in track.Keys )
+		{
+			var x = TimeToX( key.Time, clip.Duration );
+			var selected = _controller.SelectedKeys.Contains( key.Id );
+			Paint.SetBrushAndPen( selected
+				? Color.White
+				: key.Visible
+					? WeaponAnimatorTheme.Green
+					: WeaponAnimatorTheme.Coral );
+			var diamond = new[]
+			{
+				new Vector2( x, y + 5 ),
+				new Vector2( x + 5, y + TrackHeight * 0.5f ),
+				new Vector2( x, y + TrackHeight - 5 ),
+				new Vector2( x - 5, y + TrackHeight * 0.5f )
+			};
+			Paint.DrawPolygon( diamond );
 		}
 	}
 
@@ -1487,14 +1566,26 @@ internal sealed class TimelineCanvas : Widget
 		}
 	}
 
-	private TransformKey? HitKey( WeaponAnimationClip clip, Vector2 position )
+	private Guid? HitKey( WeaponAnimationClip clip, Vector2 position )
 	{
 		var trackIndex = (int)((position.y - RulerHeight) / TrackHeight);
-		if ( trackIndex < 0 || trackIndex >= clip.Tracks.Count )
+		if ( trackIndex < 0 )
 			return null;
-		var track = clip.Tracks[trackIndex];
-		return track.Keys.FirstOrDefault( x =>
-			MathF.Abs( TimeToX( x.Time, clip.Duration ) - position.x ) <= 8 );
+
+		var parts = _controller.Document.Rig.VisibilityParts;
+		if ( trackIndex < parts.Count )
+		{
+			var track = clip.VisibilityTracks.FirstOrDefault( x =>
+				x.PartId == parts[trackIndex].Id );
+			return track?.Keys.FirstOrDefault( x =>
+				MathF.Abs( TimeToX( x.Time, clip.Duration ) - position.x ) <= 8 )?.Id;
+		}
+
+		var transformIndex = trackIndex - parts.Count;
+		if ( transformIndex >= clip.Tracks.Count )
+			return null;
+		return clip.Tracks[transformIndex].Keys.FirstOrDefault( x =>
+			MathF.Abs( TimeToX( x.Time, clip.Duration ) - position.x ) <= 8 )?.Id;
 	}
 
 	private float TimeToX( float time, float duration ) =>
@@ -1519,6 +1610,8 @@ internal static class ClipExtensions
 	public static void KeysClampToDuration( this WeaponAnimationClip clip )
 	{
 		foreach ( var key in clip.Tracks.SelectMany( x => x.Keys ) )
+			key.Time = Math.Clamp( key.Time, 0, clip.Duration );
+		foreach ( var key in clip.VisibilityTracks.SelectMany( x => x.Keys ) )
 			key.Time = Math.Clamp( key.Time, 0, clip.Duration );
 		foreach ( var tag in clip.Tags )
 		{

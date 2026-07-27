@@ -145,6 +145,7 @@ public static class WeaponAnimationValidator
 	public static ValidationReport ValidateForGeneration( WeaponAnimationDocument document )
 	{
 		var report = ValidateCalibration( document );
+		ValidateVisibilityParts( document, report );
 
 		if ( !document.Calibration.Confirmed || document.Calibration.Snapshot is null )
 			report.Add( ValidationSeverity.Error, "calibration.unconfirmed", "Confirm calibration before generating." );
@@ -171,6 +172,30 @@ public static class WeaponAnimationValidator
 							"key.outside_clip",
 							$"{clip.Name}/{track.Target} has a key outside the clip duration.",
 							track.Target );
+				}
+			}
+
+			foreach ( var track in clip.VisibilityTracks )
+			{
+				if ( document.Rig.VisibilityParts.All( x => x.Id != track.PartId ) )
+				{
+					report.Add(
+						ValidationSeverity.Error,
+						"visibility.part_missing",
+						$"{clip.Name} contains a visibility track for a missing part.",
+						clip.Name );
+				}
+
+				foreach ( var key in track.Keys )
+				{
+					if ( key.Time < 0 || key.Time > clip.Duration + 0.0001f )
+					{
+						report.Add(
+							ValidationSeverity.Warning,
+							"visibility.key_outside_clip",
+							$"{clip.Name} has a visibility key outside the clip duration.",
+							clip.Name );
+					}
 				}
 			}
 		}
@@ -212,6 +237,70 @@ public static class WeaponAnimationValidator
 		}
 
 		return report;
+	}
+
+	private static void ValidateVisibilityParts(
+		WeaponAnimationDocument document,
+		ValidationReport report )
+	{
+		foreach ( var duplicate in document.Rig.VisibilityParts
+			.GroupBy( x => x.Id )
+			.Where( x => x.Count() > 1 ) )
+		{
+			report.Add(
+				ValidationSeverity.Error,
+				"visibility.duplicate_id",
+				$"Visibility part ID '{duplicate.Key}' is duplicated." );
+		}
+
+		foreach ( var duplicate in document.Rig.VisibilityParts
+			.Where( x => !string.IsNullOrWhiteSpace( x.Name ) )
+			.GroupBy( x => x.Name, StringComparer.OrdinalIgnoreCase )
+			.Where( x => x.Count() > 1 ) )
+		{
+			report.Add(
+				ValidationSeverity.Warning,
+				"visibility.duplicate_name",
+				$"Multiple visibility parts are named '{duplicate.Key}'." );
+		}
+
+		foreach ( var part in document.Rig.VisibilityParts )
+		{
+			if ( string.IsNullOrWhiteSpace( part.Name ) )
+				report.Add(
+					ValidationSeverity.Error,
+					"visibility.name_missing",
+					"A visibility part needs a display name." );
+
+			if ( part.RenderMode == VisibilityRenderMode.BodyGroup )
+			{
+				if ( string.IsNullOrWhiteSpace( part.BodyGroupName ) )
+					report.Add(
+						ValidationSeverity.Error,
+						"visibility.bodygroup_missing",
+						$"{part.Name} needs a bodygroup name.",
+						part.Name );
+				if ( part.VisibleBodyGroupValue == part.HiddenBodyGroupValue )
+					report.Add(
+						ValidationSeverity.Error,
+						"visibility.bodygroup_values",
+						$"{part.Name}'s visible and hidden bodygroup values must differ.",
+						part.Name );
+				continue;
+			}
+
+			var bone = document.Rig.RetainedBones().FirstOrDefault( x =>
+				x.Id.Equals( part.BoneId, StringComparison.OrdinalIgnoreCase )
+				|| x.Name.Equals( part.BoneName, StringComparison.OrdinalIgnoreCase ) );
+			if ( bone is null )
+			{
+				report.Add(
+					ValidationSeverity.Error,
+					"visibility.bone_missing",
+					$"{part.Name} references a missing or excluded weapon bone.",
+					part.BoneName );
+			}
+		}
 	}
 
 	private static void RequireAnchor(

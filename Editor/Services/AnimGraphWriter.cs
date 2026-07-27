@@ -42,6 +42,7 @@ public static class AnimGraphWriter
 				$"seq_{state.Name}",
 				WeaponAnimationNames.SequenceName( sequenceClip ),
 				sequenceClip,
+				document.Rig.VisibilityParts,
 				state.Loop,
 				x,
 				96 ) );
@@ -206,12 +207,23 @@ public static class AnimGraphWriter
 		string name,
 		string sequence,
 		WeaponAnimationClip clip,
+		IReadOnlyList<WeaponVisibilityPart> visibilityParts,
 		bool loop,
 		float x,
 		float y )
 	{
 		var id = Id( $"node:{name}" );
+		var visibilityTags = visibilityParts.SelectMany( part =>
+			WeaponVisibilityEvaluator.BuildSpans( part, clip ).Select( span =>
+				new AnimationTag
+				{
+					Name = span.Name,
+					Kind = AnimationTagKind.Range,
+					StartTime = span.StartTime,
+					EndTime = span.EndTime
+				} ) );
 		var tagSpans = string.Join( "\n", clip.Tags
+			.Concat( visibilityTags )
 			.Where( x => !string.IsNullOrWhiteSpace( x.Name ) )
 			.OrderBy( x => x.StartTime )
 			.ThenBy( x => x.Name )
@@ -495,6 +507,11 @@ public static class AnimGraphWriter
 
 		foreach ( var tag in document.Clips.SelectMany( x => x.Tags ) )
 			tags.Add( tag.Name );
+		foreach ( var part in document.Rig.VisibilityParts )
+		{
+			tags.Add( WeaponVisibilityEvaluator.VisibleTag( part.Id ) );
+			tags.Add( WeaponVisibilityEvaluator.HiddenTag( part.Id ) );
+		}
 
 		foreach ( var name in tags.OrderBy( x => x ) )
 		{

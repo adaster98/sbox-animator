@@ -150,7 +150,10 @@ public static class WeaponAnimationMigration
 		var idle = document.Clips.FirstOrDefault( x => x.Role == WeaponClipRole.Idle );
 		var retained = document.Rig.RetainedBones().ToList();
 		if ( idle is null || retained.Count < 2
-			|| idle.Constraints.Count > 0 || idle.Tags.Count > 0 || idle.ParameterEvents.Count > 0 )
+			|| idle.Constraints.Count > 0
+			|| idle.Tags.Count > 0
+			|| idle.VisibilityTracks.Any( x => x.Keys.Count > 0 )
+			|| idle.ParameterEvents.Count > 0 )
 			return false;
 
 		var skeleton = authoritativeSkeleton

@@ -14,6 +14,7 @@ The workspace can also be opened from **Tools → Weapon Animator**. It creates 
 
 - **Calibrate:** import a rigged FBX, SMD, DMX, or VMDL, select the weapon-bone subtree, exclude foreign branches, establish physical scale, set the grip, and optionally place rear/front markers for Auto-align.
 - **Animate:** browse the complete grouped rig at full height, pose the selected control with local/world numeric transforms or viewport gizmos, and commit poses to the timeline. To bind a hand, select that hand once in **Controls**, choose its **Attachment bone** in the inspector, then press **Bind**; multi-selection is not required. `weapon_root` is the normal grip attachment. The right column keeps the selected-control inspector above a vertically spacious clip rack, while the dope sheet remains beneath the viewport.
+- **Animate visibility:** select an isolated weapon bone such as a main or spare magazine, enable its **Visibility** channel, choose its default state, then key **Visible at playhead** or **Hidden at playhead**. These stepped rows appear above transform tracks in the dope sheet. Bone branches work for rigidly weighted parts; models with bodygroups can use explicit visible/hidden bodygroup values instead.
 - **Generate:** write the animation host, one SMD per clip, ModelDoc files, optional AnimGraph, prefab, and ownership manifest beneath `Assets/weapons/<project>/viewmodel/`.
 
 Only manifest-owned outputs are replaced during regeneration.
@@ -45,3 +46,6 @@ writes are restored on open; unbound arm chains remain in the native Facepunch p
 Viewport gizmo and numeric scrubs preview continuously without rebuilding the surrounding
 workspace, then produce one undo action on release. The visible Facepunch arms mesh follows
 the evaluated arm pose directly, including finger and IK edits.
+Visibility state is exported as deterministic AnimGraph tags and a generated runtime
+controller. Graph-free prefabs sample the active sequence directly, so magazine visibility
+has the same result in the editor preview and final playback.

@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Sandbox;
@@ -23,6 +24,7 @@ public static class PrefabWriter
 		var weaponRendererId = StableGuid( $"{document.DocumentId}:weapon_renderer" );
 		var armsId = StableGuid( $"{document.DocumentId}:arms" );
 		var armsRendererId = StableGuid( $"{document.DocumentId}:arms_renderer" );
+		var visibilityControllerId = StableGuid( $"{document.DocumentId}:visibility_controller" );
 		var muzzleId = StableGuid( $"{document.DocumentId}:muzzle" );
 		var ejectId = StableGuid( $"{document.DocumentId}:eject" );
 
@@ -41,12 +43,23 @@ public static class PrefabWriter
 				21 ) );
 
 		var root = Child( $"v_{slug}_anim", rootId );
-		root["Components"]!.AsArray().Add( Renderer( hostRendererId, hostModel, null, false ) );
+		var usesGraph = document.Output.GenerateGraph && document.Graph.GenerateGraph;
+		root["Components"]!.AsArray().Add(
+			Renderer( hostRendererId, hostModel, null, false, useAnimGraph: usesGraph ) );
 		root["Components"]!.AsArray().Add( BaseWeaponModel(
 			StableGuid( $"{document.DocumentId}:base_weapon_model" ),
 			ComponentReference( rootId, hostRendererId ),
 			GameObjectReference( muzzleId ),
 			GameObjectReference( ejectId ) ) );
+		if ( document.Rig.VisibilityParts.Count > 0 )
+		{
+			root["Components"]!.AsArray().Add( VisibilityController(
+				visibilityControllerId,
+				ComponentReference( rootId, hostRendererId ),
+				ComponentReference( weaponId, weaponRendererId ),
+				document,
+				usesGraph ) );
+		}
 		root["Children"]!.AsArray().Add( weapon );
 		root["Children"]!.AsArray().Add( arms );
 		root["Children"]!.AsArray().Add( muzzle );
@@ -74,7 +87,8 @@ public static class PrefabWriter
 		string model,
 		JsonObject? boneMerge,
 		bool gameLayer,
-		ulong bodyGroups = ulong.MaxValue ) => new()
+		ulong bodyGroups = ulong.MaxValue,
+		bool useAnimGraph = true ) => new()
 	{
 		["__type"] = "Sandbox.SkinnedModelRenderer",
 		["__guid"] = id,
@@ -121,8 +135,42 @@ public static class PrefabWriter
 			["Blending"] = false
 		},
 		["Tint"] = "1,1,1,1",
-		["UseAnimGraph"] = true
+		["UseAnimGraph"] = useAnimGraph
 	};
+
+	private static JsonObject VisibilityController(
+		string id,
+		JsonObject animationHost,
+		JsonObject weaponRenderer,
+		WeaponAnimationDocument document,
+		bool usesGraph )
+	{
+		var runtimeClips = document.Clips.Select( clip =>
+			new WeaponVisibilityRuntimeClip
+			{
+				SequenceName = WeaponAnimationNames.SequenceName( clip ),
+				Duration = clip.Duration,
+				Tracks = clip.VisibilityTracks
+			} ).ToList();
+		return new JsonObject
+		{
+			["__type"] = "SboxWeaponAnimator.WeaponPartVisibilityController",
+			["__guid"] = id,
+			["__enabled"] = true,
+			["Flags"] = 0,
+			["AnimationHost"] = animationHost,
+			["WeaponRenderer"] = weaponRenderer,
+			["UseAnimGraphTags"] = usesGraph,
+			["Parts"] = JsonSerializer.SerializeToNode( document.Rig.VisibilityParts ),
+			["Clips"] = JsonSerializer.SerializeToNode( runtimeClips ),
+			["OnComponentDestroy"] = null,
+			["OnComponentDisabled"] = null,
+			["OnComponentEnabled"] = null,
+			["OnComponentFixedUpdate"] = null,
+			["OnComponentStart"] = null,
+			["OnComponentUpdate"] = null
+		};
+	}
 
 	private static JsonObject BaseWeaponModel(
 		string id,

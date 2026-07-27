@@ -83,6 +83,7 @@ public static class CalibrationRebaser
 		foreach ( var clip in document.Clips )
 		{
 			clip.Tracks.Clear();
+			clip.VisibilityTracks.Clear();
 			clip.Constraints.Clear();
 			clip.Tags.Clear();
 			clip.ParameterEvents.Clear();

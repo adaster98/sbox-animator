@@ -118,6 +118,12 @@ public enum RigControlKind
 	Camera
 }
 
+public enum VisibilityRenderMode
+{
+	BoneBranch,
+	BodyGroup
+}
+
 public sealed class WeaponAnimationDocument
 {
 	public const int CurrentSchemaVersion = 3;
@@ -233,6 +239,7 @@ public sealed class WeaponRigDefinition
 	public string SourceSkeletonRootId { get; set; } = "";
 	public string WeaponSubtreeRootId { get; set; } = "";
 	public List<WeaponBoneDefinition> Bones { get; set; } = [];
+	public List<WeaponVisibilityPart> VisibilityParts { get; set; } = [];
 	public List<RigAuditIssue> AuditIssues { get; set; } = [];
 	public string ProfileHash { get; set; } = "";
 	public bool ReviewRequired { get; set; }
@@ -246,6 +253,19 @@ public sealed class WeaponRigDefinition
 	public IEnumerable<WeaponBoneDefinition> RetainedBones() =>
 		Bones.Where( x => x.Inclusion != WeaponBoneInclusion.Excluded
 			&& x.Classification != WeaponBoneClassification.Ignored );
+}
+
+public sealed class WeaponVisibilityPart
+{
+	public Guid Id { get; set; } = Guid.NewGuid();
+	public string Name { get; set; } = "Visible Part";
+	public string BoneId { get; set; } = "";
+	public string BoneName { get; set; } = "";
+	public bool DefaultVisible { get; set; } = true;
+	public VisibilityRenderMode RenderMode { get; set; } = VisibilityRenderMode.BoneBranch;
+	public string BodyGroupName { get; set; } = "";
+	public int VisibleBodyGroupValue { get; set; } = 1;
+	public int HiddenBodyGroupValue { get; set; }
 }
 
 public sealed class WeaponBoneDefinition
@@ -413,6 +433,7 @@ public sealed class WeaponAnimationClip
 	public bool AllowSubframeKeys { get; set; }
 	public bool Loop { get; set; }
 	public List<TransformTrack> Tracks { get; set; } = [];
+	public List<VisibilityTrack> VisibilityTracks { get; set; } = [];
 	public List<TimedConstraint> Constraints { get; set; } = [];
 	public List<AnimationTag> Tags { get; set; } = [];
 	public List<ClipParameterEvent> ParameterEvents { get; set; } = [];
@@ -435,6 +456,32 @@ public sealed class WeaponAnimationClip
 		Tracks.Add( track );
 		return track;
 	}
+
+	public VisibilityTrack EnsureVisibilityTrack( Guid partId )
+	{
+		var track = VisibilityTracks.FirstOrDefault( x => x.PartId == partId );
+		if ( track is not null )
+			return track;
+
+		track = new VisibilityTrack { PartId = partId };
+		VisibilityTracks.Add( track );
+		return track;
+	}
+}
+
+public sealed class VisibilityTrack
+{
+	public Guid Id { get; set; } = Guid.NewGuid();
+	public Guid PartId { get; set; }
+	public List<VisibilityKey> Keys { get; set; } = [];
+	public bool Muted { get; set; }
+}
+
+public sealed class VisibilityKey
+{
+	public Guid Id { get; set; } = Guid.NewGuid();
+	public float Time { get; set; }
+	public bool Visible { get; set; } = true;
 }
 
 public sealed class TransformTrack

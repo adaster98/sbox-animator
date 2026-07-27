@@ -239,8 +239,10 @@ public sealed class WeaponAnimatorController
 
 		var payload = new KeyClipboardPayload
 		{
-			Origin = clip.Tracks
-				.SelectMany( x => x.Keys )
+			Origin = clip.Tracks.SelectMany( x => x.Keys )
+				.Select( x => (x.Id, x.Time) )
+				.Concat( clip.VisibilityTracks.SelectMany( x => x.Keys )
+					.Select( x => (x.Id, x.Time) ) )
 				.Where( x => _selectedKeys.Contains( x.Id ) )
 				.Select( x => x.Time )
 				.DefaultIfEmpty( 0 )
@@ -258,6 +260,19 @@ public sealed class WeaponAnimatorController
 				Target = track.Target,
 				Kind = track.Kind,
 				Interpolation = track.Interpolation,
+				Keys = keys
+			} );
+		}
+
+		foreach ( var track in clip.VisibilityTracks )
+		{
+			var keys = track.Keys.Where( x => _selectedKeys.Contains( x.Id ) ).ToList();
+			if ( keys.Count == 0 )
+				continue;
+
+			payload.VisibilityTracks.Add( new ClipboardVisibilityTrack
+			{
+				PartId = track.PartId,
 				Keys = keys
 			} );
 		}
@@ -306,6 +321,26 @@ public sealed class WeaponAnimatorController
 
 				targetTrack.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
 			}
+
+			foreach ( var sourceTrack in payload.VisibilityTracks )
+			{
+				if ( Document.Rig.VisibilityParts.All( x => x.Id != sourceTrack.PartId ) )
+					continue;
+				var targetTrack = clip.EnsureVisibilityTrack( sourceTrack.PartId );
+				foreach ( var sourceKey in sourceTrack.Keys )
+				{
+					var key = Json.Deserialize<VisibilityKey>( Json.Serialize( sourceKey ) )!;
+					key.Id = Guid.NewGuid();
+					key.Time = WeaponAnimationMath.SnapTime(
+						pasteTime + sourceKey.Time - payload.Origin,
+						clip.SampleRate,
+						clip.AllowSubframeKeys );
+					targetTrack.Keys.Add( key );
+					_selectedKeys.Add( key.Id );
+				}
+
+				targetTrack.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
+			}
 		} );
 
 		SelectionChanged?.Invoke();
@@ -321,6 +356,8 @@ public sealed class WeaponAnimatorController
 		{
 			IdleBindPoseService.MarkAuthored( clip );
 			foreach ( var track in clip.Tracks )
+				track.Keys.RemoveAll( x => _selectedKeys.Contains( x.Id ) );
+			foreach ( var track in clip.VisibilityTracks )
 				track.Keys.RemoveAll( x => _selectedKeys.Contains( x.Id ) );
 			_selectedKeys.Clear();
 		} );
@@ -462,6 +499,138 @@ public sealed class WeaponAnimatorController
 			.Keys.Any( x => MathF.Abs( x.Time - snapped ) <= 0.0001f ) == true;
 	}
 
+	public WeaponVisibilityPart? GetVisibilityPart( string boneName ) =>
+		Document.Rig.VisibilityParts.FirstOrDefault( x =>
+			x.BoneName.Equals( boneName, StringComparison.OrdinalIgnoreCase ) );
+
+	public void AddVisibilityPart( string boneName )
+	{
+		var definition = Document.Rig.RetainedBones().FirstOrDefault( x =>
+			x.Name.Equals( boneName, StringComparison.OrdinalIgnoreCase ) );
+		if ( definition is null || GetVisibilityPart( boneName ) is not null )
+			return;
+
+		Mutate( $"Enable visibility for {boneName}", document =>
+		{
+			document.Rig.VisibilityParts.Add( new WeaponVisibilityPart
+			{
+				Name = DisplayVisibilityName( boneName ),
+				BoneId = definition.Id,
+				BoneName = definition.Name
+			} );
+		} );
+	}
+
+	public void RemoveVisibilityPart( Guid partId )
+	{
+		var part = Document.Rig.VisibilityParts.FirstOrDefault( x => x.Id == partId );
+		if ( part is null )
+			return;
+
+		Mutate( $"Remove visibility from {part.Name}", document =>
+		{
+			document.Rig.VisibilityParts.RemoveAll( x => x.Id == partId );
+			foreach ( var clip in document.Clips )
+				clip.VisibilityTracks.RemoveAll( x => x.PartId == partId );
+			_selectedKeys.Clear();
+		} );
+		SelectionChanged?.Invoke();
+	}
+
+	public void UpdateVisibilityPart(
+		Guid partId,
+		string description,
+		Action<WeaponVisibilityPart> mutation )
+	{
+		var part = Document.Rig.VisibilityParts.FirstOrDefault( x => x.Id == partId );
+		if ( part is null )
+			return;
+		Mutate( description, _ => mutation( part ) );
+	}
+
+	public bool EvaluateVisibility( Guid partId )
+	{
+		var part = Document.Rig.VisibilityParts.FirstOrDefault( x => x.Id == partId );
+		return part is not null && WeaponVisibilityEvaluator.Evaluate(
+			part,
+			Document.GetSelectedClip(),
+			Document.Workspace.TimelineTime );
+	}
+
+	public bool HasVisibilityKeyAtPlayhead( Guid partId )
+	{
+		var clip = Document.GetSelectedClip();
+		if ( clip is null )
+			return false;
+		var snapped = WeaponAnimationMath.SnapTime(
+			Document.Workspace.TimelineTime,
+			clip.SampleRate,
+			clip.AllowSubframeKeys );
+		return clip.VisibilityTracks.FirstOrDefault( x => x.PartId == partId )?
+			.Keys.Any( x => MathF.Abs( x.Time - snapped ) <= 0.0001f ) == true;
+	}
+
+	public void UpsertVisibilityKey( Guid partId, bool visible )
+	{
+		var clip = Document.GetSelectedClip();
+		var part = Document.Rig.VisibilityParts.FirstOrDefault( x => x.Id == partId );
+		if ( clip is null || part is null )
+			return;
+
+		var snapped = WeaponAnimationMath.SnapTime(
+			Document.Workspace.TimelineTime,
+			clip.SampleRate,
+			clip.AllowSubframeKeys );
+		Mutate( $"{(visible ? "Show" : "Hide")} {part.Name}", _ =>
+		{
+			IdleBindPoseService.MarkAuthored( clip );
+			var key = WeaponVisibilityEvaluator.UpsertKey(
+				clip.EnsureVisibilityTrack( partId ),
+				snapped,
+				visible );
+			_selectedKeys.Clear();
+			_selectedKeys.Add( key.Id );
+			clip.Readiness = clip.Role == WeaponClipRole.Idle
+				? ClipReadiness.Ready
+				: ClipReadiness.Draft;
+		} );
+		SelectionChanged?.Invoke();
+	}
+
+	public void RemoveVisibilityKeyAtPlayhead( Guid partId )
+	{
+		var clip = Document.GetSelectedClip();
+		var part = Document.Rig.VisibilityParts.FirstOrDefault( x => x.Id == partId );
+		if ( clip is null || part is null )
+			return;
+		var snapped = WeaponAnimationMath.SnapTime(
+			Document.Workspace.TimelineTime,
+			clip.SampleRate,
+			clip.AllowSubframeKeys );
+		Mutate( $"Remove {part.Name} visibility key", _ =>
+		{
+			var track = clip.VisibilityTracks.FirstOrDefault( x => x.PartId == partId );
+			if ( track is null )
+				return;
+			track.Keys.RemoveAll( x => MathF.Abs( x.Time - snapped ) <= 0.0001f );
+			if ( track.Keys.Count == 0 )
+				clip.VisibilityTracks.Remove( track );
+		} );
+	}
+
+	private static string DisplayVisibilityName( string boneName )
+	{
+		var words = boneName
+			.Replace( '_', ' ' )
+			.Replace( '-', ' ' )
+			.Trim();
+		return string.IsNullOrWhiteSpace( words )
+			? "Visible Part"
+			: string.Join( " ", words
+				.Split( ' ', StringSplitOptions.RemoveEmptyEntries )
+				.Select( x => char.ToUpperInvariant( x[0] ) + x[1..] ) );
+	}
+
 	private void SetDirty( bool value )
 	{
 		if ( IsDirty == value )
@@ -481,6 +650,7 @@ public sealed class WeaponAnimatorController
 	{
 		public float Origin { get; set; }
 		public List<ClipboardTrack> Tracks { get; set; } = [];
+		public List<ClipboardVisibilityTrack> VisibilityTracks { get; set; } = [];
 	}
 
 	private sealed class ClipboardTrack
@@ -489,5 +659,11 @@ public sealed class WeaponAnimatorController
 		public RigControlKind Kind { get; set; }
 		public TrackInterpolation Interpolation { get; set; }
 		public List<TransformKey> Keys { get; set; } = [];
+	}
+
+	private sealed class ClipboardVisibilityTrack
+	{
+		public Guid PartId { get; set; }
+		public List<VisibilityKey> Keys { get; set; } = [];
 	}
 }
