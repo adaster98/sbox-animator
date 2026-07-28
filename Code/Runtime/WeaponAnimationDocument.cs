@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Serialization;
 using Sandbox;
 
 namespace SboxWeaponAnimator;
@@ -171,6 +172,10 @@ public sealed class WeaponAnimationDocument
 	public AnimGraphSettings Graph { get; set; } = new();
 	public OutputSettings Output { get; set; } = new();
 	public WorkspaceState Workspace { get; set; } = new();
+
+	// Ownership is persisted beside generated assets. Keeping file-like strings out of the
+	// GameResource prevents the asset compiler from treating manifest entries as dependencies.
+	[JsonIgnore]
 	public GenerationManifest Manifest { get; set; } = new();
 
 	public static WeaponAnimationDocument CreateDefault( string name = "New Weapon" )

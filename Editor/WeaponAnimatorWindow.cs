@@ -16,6 +16,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private readonly WeaponAnimatorController _controller = new();
 	private readonly WeaponSourceImporter _importer = new();
 	private readonly AssetGenerationService _generator = new();
+	private bool _generating;
 	private Asset? _asset;
 	private WeaponAnimationAsset? _resource;
 	private Widget? _root;
@@ -807,28 +808,47 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		RefreshTitle();
 	}
 
-	private void GenerateAssets()
+	private async void GenerateAssets()
 	{
-		var result = _generator.Generate( _controller.Document );
-		if ( result.Success )
+		// Compiling waits on the asset system across frames, so keep a second press from
+		// starting a competing run over the same output files.
+		if ( _generating )
+			return;
+
+		_generating = true;
+		try
 		{
-			_statusPanel?.SetMessage(
-				$"Generated and reloaded {result.GeneratedFiles.Count} files in {result.OutputFolder}.",
-				ValidationSeverity.Info );
-			Save();
+			_statusPanel?.SetMessage( "Generating and compiling assets…", ValidationSeverity.Info );
+			var result = await _generator.GenerateAsync( _controller.Document );
+			if ( result.Success )
+			{
+				_statusPanel?.SetMessage(
+					$"Generated and reloaded {result.GeneratedFiles.Count} files in {result.OutputFolder}.",
+					ValidationSeverity.Info );
+				Save();
+			}
+			else
+			{
+				var message = string.Join(
+					"  ·  ",
+					result.Diagnostics.Where( x => x.Severity == ValidationSeverity.Error )
+						.Select( x => x.Message )
+						.Take( 4 ) );
+				_statusPanel?.SetMessage(
+					string.IsNullOrWhiteSpace( message ) ? "Generation failed validation." : message,
+					ValidationSeverity.Error );
+			}
 		}
-		else
+		catch ( Exception ex )
 		{
-			var message = string.Join(
-				"  ·  ",
-				result.Diagnostics.Where( x => x.Severity == ValidationSeverity.Error )
-					.Select( x => x.Message )
-					.Take( 4 ) );
-			_statusPanel?.SetMessage(
-				string.IsNullOrWhiteSpace( message ) ? "Generation failed validation." : message,
-				ValidationSeverity.Error );
+			Log.Error( $"[Weapon Animator] generation threw: {ex}" );
+			_statusPanel?.SetMessage( $"Generation failed: {ex.Message}", ValidationSeverity.Error );
 		}
-		RefreshToolbarState();
+		finally
+		{
+			_generating = false;
+			RefreshToolbarState();
+		}
 	}
 
 	private void Validate()
@@ -853,11 +873,20 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 	private void OpenGeneratedFolder()
 	{
-		var path = AssetGenerationService.GetOutputFolder( _controller.Document );
-		if ( Directory.Exists( path ) )
-			EditorUtility.OpenFolder( path );
-		else
-			_statusPanel?.SetMessage( "Generate assets before opening the output folder.", ValidationSeverity.Warning );
+		try
+		{
+			var path = AssetGenerationService.GetOutputFolder( _controller.Document );
+			if ( Directory.Exists( path ) )
+				EditorUtility.OpenFolder( path );
+			else
+				_statusPanel?.SetMessage( "Generate assets before opening the output folder.", ValidationSeverity.Warning );
+		}
+		catch ( Exception ex )
+		{
+			_statusPanel?.SetMessage(
+				$"Could not resolve the output folder: {ex.Message}",
+				ValidationSeverity.Error );
+		}
 	}
 
 	private void TogglePlayback()

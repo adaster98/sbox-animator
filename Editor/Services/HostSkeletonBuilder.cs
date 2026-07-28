@@ -45,6 +45,84 @@ public sealed class HostSkeleton
 
 		return parent.BindModelTransform.ToLocal( bone.BindModelTransform );
 	}
+
+	public void RebuildModelTransformsFromLocals()
+	{
+		var pending = Bones.ToList();
+		var rebuilt = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+		while ( pending.Count > 0 )
+		{
+			var progressed = false;
+			for ( var i = pending.Count - 1; i >= 0; i-- )
+			{
+				var bone = pending[i];
+				if ( !string.IsNullOrWhiteSpace( bone.ParentName )
+					&& ByName.ContainsKey( bone.ParentName )
+					&& !rebuilt.Contains( bone.ParentName ) )
+				{
+					continue;
+				}
+
+				var local = GetBindLocal( bone );
+				bone.BindModelTransform = string.IsNullOrWhiteSpace( bone.ParentName )
+					|| !ByName.TryGetValue( bone.ParentName, out var parent )
+						? local
+						: ComposeLocal( parent.BindModelTransform, local );
+				rebuilt.Add( bone.Name );
+				pending.RemoveAt( i );
+				progressed = true;
+			}
+
+			if ( progressed )
+				continue;
+
+			throw new InvalidOperationException(
+				$"The animation host contains a cyclic bone hierarchy near '{pending[0].Name}'." );
+		}
+	}
+
+	public IReadOnlyDictionary<string, Transform> BuildCompilerBindModelTransforms()
+	{
+		var result = new Dictionary<string, Transform>( StringComparer.OrdinalIgnoreCase );
+		var pending = Bones.ToList();
+		while ( pending.Count > 0 )
+		{
+			var progressed = false;
+			for ( var i = pending.Count - 1; i >= 0; i-- )
+			{
+				var bone = pending[i];
+				if ( !string.IsNullOrWhiteSpace( bone.ParentName )
+					&& ByName.ContainsKey( bone.ParentName )
+					&& !result.ContainsKey( bone.ParentName ) )
+				{
+					continue;
+				}
+
+				// ModelDoc bakes source scale into mesh data, then exposes a scale-one bind
+				// skeleton without propagating the authored parent scale into child offsets.
+				var local = GetBindLocal( bone ).WithScale( Vector3.One );
+				result[bone.Name] = string.IsNullOrWhiteSpace( bone.ParentName )
+					|| !result.TryGetValue( bone.ParentName, out var parent )
+						? local
+						: ComposeLocal( parent, local );
+				pending.RemoveAt( i );
+				progressed = true;
+			}
+
+			if ( progressed )
+				continue;
+
+			throw new InvalidOperationException(
+				$"The animation host contains a cyclic bone hierarchy near '{pending[0].Name}'." );
+		}
+
+		return result;
+	}
+
+	private static Transform ComposeLocal( Transform parent, Transform local ) => new(
+		parent.PointToWorld( local.Position ),
+		parent.Rotation * local.Rotation,
+		parent.Scale * local.Scale );
 }
 
 public static class HostSkeletonBuilder
@@ -149,6 +227,10 @@ public static class HostSkeletonBuilder
 			} );
 		}
 
+		// Replacing Facepunch's weapon_root changes every canonical helper below it. Their local
+		// bind transforms remain authoritative, so rebuild model-space values before validation,
+		// pose evaluation, and export inspect the combined hierarchy.
+		skeleton.RebuildModelTransformsFromLocals();
 		return skeleton;
 	}
 

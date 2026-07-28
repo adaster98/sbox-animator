@@ -14,56 +14,32 @@ public static class PrefabWriter
 {
 	public static string Write(
 		WeaponAnimationDocument document,
-		string hostModel,
-		string weaponModel )
+		string hostModel )
 	{
 		var slug = WeaponAnimationDocument.Slugify( document.Output.AssetName );
 		var rootId = StableGuid( $"{document.DocumentId}:root" );
 		var hostRendererId = StableGuid( $"{document.DocumentId}:host_renderer" );
-		var weaponId = StableGuid( $"{document.DocumentId}:weapon" );
-		var weaponRendererId = StableGuid( $"{document.DocumentId}:weapon_renderer" );
 		var armsId = StableGuid( $"{document.DocumentId}:arms" );
 		var armsRendererId = StableGuid( $"{document.DocumentId}:arms_renderer" );
-		var visibilityControllerId = StableGuid( $"{document.DocumentId}:visibility_controller" );
-		var muzzleId = StableGuid( $"{document.DocumentId}:muzzle" );
-		var ejectId = StableGuid( $"{document.DocumentId}:eject" );
+		var cameraId = StableGuid( $"{document.DocumentId}:camera" );
 
-		var muzzle = Child( "muzzle", muzzleId, document.Calibration.GetAnchor( AnchorKind.Muzzle ) );
-		var eject = Child( "eject", ejectId, document.Calibration.GetAnchor( AnchorKind.Eject ) );
-		var weapon = Child( "source_weapon", weaponId );
-		weapon["Components"]!.AsArray().Add(
-			Renderer( weaponRendererId, weaponModel, ComponentReference( rootId, hostRendererId ), true ) );
-		var arms = Child( "facepunch_arms", armsId );
+		var root = Child( $"v_{slug}_anim", rootId );
+		var usesGraph = document.Output.GenerateGraph && document.Graph.GenerateGraph;
+		root["Components"]!.AsArray().Add(
+			Renderer( hostRendererId, hostModel, null, true, useAnimGraph: usesGraph ) );
+
+		// Match Facepunch viewmodels: one visible animated root, bone-merged arms, and camera.
+		var arms = Child( "v_first_person_arms_human", armsId );
 		arms["Components"]!.AsArray().Add(
 			Renderer(
 				armsRendererId,
 				HostSkeletonBuilder.ProductionArmsModel,
 				ComponentReference( rootId, hostRendererId ),
-				true,
+				false,
 				21 ) );
-
-		var root = Child( $"v_{slug}_anim", rootId );
-		var usesGraph = document.Output.GenerateGraph && document.Graph.GenerateGraph;
-		root["Components"]!.AsArray().Add(
-			Renderer( hostRendererId, hostModel, null, false, useAnimGraph: usesGraph ) );
-		root["Components"]!.AsArray().Add( BaseWeaponModel(
-			StableGuid( $"{document.DocumentId}:base_weapon_model" ),
-			ComponentReference( rootId, hostRendererId ),
-			GameObjectReference( muzzleId ),
-			GameObjectReference( ejectId ) ) );
-		if ( document.Rig.VisibilityParts.Count > 0 )
-		{
-			root["Components"]!.AsArray().Add( VisibilityController(
-				visibilityControllerId,
-				ComponentReference( rootId, hostRendererId ),
-				ComponentReference( weaponId, weaponRendererId ),
-				document,
-				usesGraph ) );
-		}
-		root["Children"]!.AsArray().Add( weapon );
 		root["Children"]!.AsArray().Add( arms );
-		root["Children"]!.AsArray().Add( muzzle );
-		root["Children"]!.AsArray().Add( eject );
+		root["Children"]!.AsArray().Add( Child( "camera", cameraId ) );
+		AddAnchorChildren( document, root["Children"]!.AsArray() );
 		root["__properties"] = SceneProperties();
 		root["__variables"] = new JsonArray();
 
@@ -75,11 +51,84 @@ public static class PrefabWriter
 			["MenuPath"] = null,
 			["MenuIcon"] = null,
 			["DontBreakAsTemplate"] = false,
-			["__references"] = new JsonArray(),
+			["__references"] = PackageReferences(
+				HostSkeletonBuilder.ProductionArmsModel,
+				hostModel ),
 			["__version"] = 2
 		};
 
 		return prefab.ToJsonString( new JsonSerializerOptions { WriteIndented = true } ) + "\n";
+	}
+
+	private static void AddAnchorChildren(
+		WeaponAnimationDocument document,
+		JsonArray children )
+	{
+		var placement = WeaponAnimationMath.Compose(
+			document.Calibration.PhysicalTransform,
+			document.Calibration.FramingTransform );
+		foreach ( var anchor in document.Calibration.Anchors
+			.Where( anchor => anchor.Kind is AnchorKind.Muzzle
+				or AnchorKind.Eject
+				or AnchorKind.Custom )
+			.OrderBy( anchor => anchor.Kind )
+			.ThenBy( anchor => anchor.Name, StringComparer.OrdinalIgnoreCase ) )
+		{
+			var name = anchor.Kind switch
+			{
+				AnchorKind.Muzzle => "muzzle",
+				AnchorKind.Eject => "eject",
+				_ => WeaponAnimationDocument.Slugify( anchor.Name )
+			};
+			if ( string.IsNullOrWhiteSpace( name ) )
+				continue;
+
+			var transform = new Transform(
+				placement.PointToWorld( anchor.LocalPosition ),
+				placement.Rotation * anchor.LocalRotation );
+			children.Add( Child(
+				name,
+				StableGuid( $"{document.DocumentId}:anchor:{anchor.Id}" ),
+				transform ) );
+		}
+	}
+
+	/// <summary>
+	/// Cloud models only resolve on another machine when the prefab declares their package.
+	/// </summary>
+	private static JsonArray PackageReferences( params string[] modelPaths )
+	{
+		var references = new JsonArray();
+		var seen = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+		foreach ( var path in modelPaths )
+		{
+			if ( string.IsNullOrWhiteSpace( path ) )
+				continue;
+
+			string? reference;
+			try
+			{
+				var package = global::Editor.AssetSystem.FindByPath( path )?.Package;
+				if ( package is null )
+					continue;
+
+				var version = package.Revision?.VersionId;
+				reference = version is null
+					? package.FullIdent
+					: $"{package.FullIdent}#{version}";
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning(
+					$"[Weapon Animator] could not resolve a package for '{path}': {ex.Message}" );
+				continue;
+			}
+
+			if ( !string.IsNullOrWhiteSpace( reference ) && seen.Add( reference ) )
+				references.Add( reference );
+		}
+
+		return references;
 	}
 
 	private static JsonObject Renderer(
@@ -138,89 +187,39 @@ public static class PrefabWriter
 		["UseAnimGraph"] = useAnimGraph
 	};
 
-	private static JsonObject VisibilityController(
+	private static JsonObject Child(
+		string name,
 		string id,
-		JsonObject animationHost,
-		JsonObject weaponRenderer,
-		WeaponAnimationDocument document,
-		bool usesGraph )
+		Transform? transform = null )
 	{
-		var runtimeClips = document.Clips.Select( clip =>
-			new WeaponVisibilityRuntimeClip
-			{
-				SequenceName = WeaponAnimationNames.SequenceName( clip ),
-				Duration = clip.Duration,
-				Tracks = clip.VisibilityTracks
-			} ).ToList();
+		var value = transform ?? Transform.Zero;
+		var rotation = value.Rotation.Normal;
 		return new JsonObject
-		{
-			["__type"] = "SboxWeaponAnimator.WeaponPartVisibilityController",
-			["__guid"] = id,
-			["__enabled"] = true,
-			["Flags"] = 0,
-			["AnimationHost"] = animationHost,
-			["WeaponRenderer"] = weaponRenderer,
-			["UseAnimGraphTags"] = usesGraph,
-			["Parts"] = JsonSerializer.SerializeToNode( document.Rig.VisibilityParts ),
-			["Clips"] = JsonSerializer.SerializeToNode( runtimeClips ),
-			["OnComponentDestroy"] = null,
-			["OnComponentDisabled"] = null,
-			["OnComponentEnabled"] = null,
-			["OnComponentFixedUpdate"] = null,
-			["OnComponentStart"] = null,
-			["OnComponentUpdate"] = null
-		};
-	}
-
-	private static JsonObject BaseWeaponModel(
-		string id,
-		JsonObject renderer,
-		JsonObject muzzle,
-		JsonObject eject ) => new()
 	{
-		["__type"] = "Sandbox.BaseWeaponModel",
 		["__guid"] = id,
-		["__enabled"] = true,
+		["__version"] = 2,
 		["Flags"] = 0,
-		["Renderer"] = renderer,
-		["DeploySound"] = null,
-		["MuzzleGameObject"] = muzzle,
-		["ShellEjectGameObject"] = eject,
-		["MuzzleEffect"] = null,
-		["EjectBrass"] = null,
-		["TracerEffect"] = null,
-		["OnComponentDestroy"] = null,
-		["OnComponentDisabled"] = null,
-		["OnComponentEnabled"] = null,
-		["OnComponentFixedUpdate"] = null,
-		["OnComponentStart"] = null,
-		["OnComponentUpdate"] = null
+		["Name"] = name,
+		["Position"] = Vector( value.Position ),
+		["Rotation"] = $"{F( rotation.x )},{F( rotation.y )},{F( rotation.z )},{F( rotation.w )}",
+		["Scale"] = Vector( value.Scale ),
+		["Tags"] = "",
+		["Enabled"] = true,
+		["NetworkMode"] = 2,
+		["NetworkFlags"] = 0,
+		["NetworkOrphaned"] = 0,
+		["NetworkTransmit"] = true,
+		["OwnerTransfer"] = 1,
+		["Components"] = new JsonArray(),
+		["Children"] = new JsonArray()
 	};
-
-	private static JsonObject Child( string name, string id, WeaponAnchor? anchor = null )
-	{
-		var position = anchor?.LocalPosition ?? Vector3.Zero;
-		var rotation = anchor?.LocalRotation ?? Rotation.Identity;
-		return new JsonObject
-		{
-			["__guid"] = id,
-			["__version"] = 2,
-			["Flags"] = 0,
-			["Name"] = name,
-			["Position"] = VectorString( position ),
-			["Rotation"] = RotationString( rotation ),
-			["Scale"] = "1,1,1",
-			["Tags"] = "",
-			["Enabled"] = true,
-			["NetworkMode"] = 2,
-			["NetworkFlags"] = 0,
-			["NetworkOrphaned"] = 0,
-			["NetworkTransmit"] = true,
-			["OwnerTransfer"] = 1,
-			["Components"] = new JsonArray(),
-			["Children"] = new JsonArray()
-		};
 	}
+
+	private static string Vector( Vector3 value ) =>
+		$"{F( value.x )},{F( value.y )},{F( value.z )}";
+
+	private static string F( float value ) =>
+		value.ToString( "0.######", CultureInfo.InvariantCulture );
 
 	private static JsonObject ComponentReference( string gameObject, string component ) => new()
 	{
@@ -228,12 +227,6 @@ public static class PrefabWriter
 		["component_id"] = component,
 		["go"] = gameObject,
 		["component_type"] = "SkinnedModelRenderer"
-	};
-
-	private static JsonObject GameObjectReference( string gameObject ) => new()
-	{
-		["_type"] = "gameobject",
-		["go"] = gameObject
 	};
 
 	private static JsonObject SceneProperties() => new()
@@ -258,15 +251,6 @@ public static class PrefabWriter
 			["CustomBounds"] = false
 		}
 	};
-
-	private static string VectorString( Vector3 value ) =>
-		$"{F( value.x )},{F( value.y )},{F( value.z )}";
-
-	private static string RotationString( Rotation value ) =>
-		$"{F( value.x )},{F( value.y )},{F( value.z )},{F( value.w )}";
-
-	private static string F( float value ) =>
-		value.ToString( "0.######", CultureInfo.InvariantCulture );
 
 	private static string StableGuid( string value )
 	{

@@ -412,9 +412,9 @@ public static class AnimGraphWriter
 		var bools = new[]
 		{
 			"b_grounded", "b_jump", "b_sprint", "b_attack", "b_attack_dry", "b_attack_has_hit",
-			"b_reload", "b_empty", "b_deploy", "b_deploy_skip", "b_twohanded",
-			"b_lower_weapon", "b_holster", "b_grab", "b_inspect", "b_reloading",
-			"b_reloading_shell", "b_reloading_first_shell"
+			"b_reload", "b_empty", "b_deploy", "b_deploy_skip", "b_deploy_first",
+			"b_twohanded", "b_lower_weapon", "b_holster", "b_grab", "b_inspect",
+			"b_reloading", "b_reloading_shell", "b_reloading_first_shell"
 		};
 		foreach ( var name in bools )
 			yield return BoolParameter( name, pulseBools.Contains( name ) );

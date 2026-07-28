@@ -55,9 +55,10 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "constraint maintained offset", TestConstraintMaintainedOffset );
 		Run( report, "history and key clipboard", TestControllerHistoryAndClipboard );
 		Run( report, "calibration and generation validation", TestValidation );
+		Run( report, "generation output paths", TestGenerationOutputPaths );
+		Run( report, "generated file removal", TestGeneratedFileRemoval );
 		Run( report, "calibration rebase", TestRebase );
-		Run( report, "SMD output", TestSmdOutput );
-		Run( report, "DMX host reference", TestDmxOutput );
+		Run( report, "DMX output", TestDmxOutput );
 		Run( report, "filtered source wrapper", TestFilteredSourceWrapper );
 		Run( report, "deterministic generated text", TestDeterministicOutput );
 		Run( report, "AnimGraph tags and fallbacks", TestAnimGraphTagsAndFallbacks );
@@ -490,6 +491,66 @@ public static class WeaponAnimatorSelfTests
 			solvedRenderer.Scale,
 			0.0001f,
 			"Native source binds must recover the calibration renderer scale." );
+
+		var rebuiltHierarchy = new HostSkeleton();
+		rebuiltHierarchy.Add( new HostBone
+		{
+			Name = "root",
+			BindModelTransform = new Transform( new Vector3( 4, 0, 0 ) ),
+			BindLocalTransform = new Transform( new Vector3( 4, 0, 0 ) ),
+			HasExplicitBindLocal = true
+		} );
+		rebuiltHierarchy.Add( new HostBone
+		{
+			Name = "weapon_root",
+			ParentName = "root",
+			BindModelTransform = new Transform( new Vector3( 999 ) ),
+			BindLocalTransform = new Transform(
+				new Vector3( 2, 0, 0 ),
+				Rotation.FromYaw( 90 ),
+				0.5f ),
+			HasExplicitBindLocal = true
+		} );
+		rebuiltHierarchy.Add( new HostBone
+		{
+			Name = "weapon_helper",
+			ParentName = "weapon_root",
+			BindModelTransform = new Transform( new Vector3( -999 ) ),
+			BindLocalTransform = new Transform( new Vector3( 2, 0, 0 ) ),
+			HasExplicitBindLocal = true
+		} );
+		rebuiltHierarchy.RebuildModelTransformsFromLocals();
+		var expectedHelper = WeaponAnimationMath.Compose(
+			rebuiltHierarchy.ByName["weapon_root"].BindModelTransform,
+			rebuiltHierarchy.ByName["weapon_helper"].BindLocalTransform );
+		Near(
+			report,
+			expectedHelper.Position,
+			rebuiltHierarchy.ByName["weapon_helper"].BindModelTransform.Position,
+			0.0001f,
+			"Changing weapon_root must rebuild canonical helper model transforms from their untouched local binds." );
+		Near(
+			report,
+			expectedHelper.Scale,
+			rebuiltHierarchy.ByName["weapon_helper"].BindModelTransform.Scale,
+			0.0001f,
+			"Rebuilt helper binds must preserve the calibrated parent scale exactly once." );
+		var compilerBinds = rebuiltHierarchy.BuildCompilerBindModelTransforms();
+		var compilerRoot = compilerBinds["weapon_root"];
+		var compilerHelper = compilerBinds["weapon_helper"];
+		Near(
+			report,
+			Vector3.One,
+			compilerRoot.Scale,
+			0.0001f,
+			"Compiled bind expectations must model ModelDoc's scale-one skeleton." );
+		Near(
+			report,
+			compilerRoot.PointToWorld(
+				rebuiltHierarchy.ByName["weapon_helper"].BindLocalTransform.Position ),
+			compilerHelper.Position,
+			0.0001f,
+			"Compiled bind expectations must not propagate authored parent scale into child offsets." );
 	}
 
 	private static void TestRigBrowserGrouping( WeaponAnimatorSelfTestReport report )
@@ -743,14 +804,14 @@ public static class WeaponAnimatorSelfTests
 			0.0001f,
 			"The editor preview must include the active working pose." );
 
-		var smdWithWorkingPose = SmdWriter.WriteClip( document, skeleton, clip );
+		var exportWithWorkingPose = DmxWriter.WriteAnimation( document, skeleton, clip );
 		document.Workspace.WorkingPoseOverrides.Clear();
-		var smdWithoutWorkingPose = SmdWriter.WriteClip( document, skeleton, clip );
+		var exportWithoutWorkingPose = DmxWriter.WriteAnimation( document, skeleton, clip );
 		Equal(
 			report,
-			smdWithoutWorkingPose,
-			smdWithWorkingPose,
-			"Working poses must not affect deterministic SMD output." );
+			exportWithoutWorkingPose,
+			exportWithWorkingPose,
+			"Working poses must not affect deterministic animation output." );
 
 		var controller = new WeaponAnimatorController();
 		controller.SetDocument( document );
@@ -1585,15 +1646,15 @@ public static class WeaponAnimatorSelfTests
 			Name = "root",
 			BindModelTransform = Transform.Zero
 		} );
-		var firstExport = SmdWriter.WriteClip(
+		var firstExport = DmxWriter.WriteAnimation(
 			exportDocument, exportSkeleton, exportClip );
-		var secondExport = SmdWriter.WriteClip(
+		var secondExport = DmxWriter.WriteAnimation(
 			exportDocument, exportSkeleton, exportClip );
 		Equal(
 			report,
 			firstExport,
 			secondExport,
-			"Customized curves must produce deterministic sampled SMD output." );
+			"Customized curves must produce deterministic sampled animation output." );
 	}
 
 	private static void TestFrameSnapping( WeaponAnimatorSelfTestReport report )
@@ -2244,6 +2305,181 @@ public static class WeaponAnimatorSelfTests
 				"A classified source root may use a reserved name before wrapper normalization." );
 	}
 
+	private static void TestGenerationOutputPaths( WeaponAnimatorSelfTestReport report )
+	{
+		var contentRoot = Path.Combine(
+			Path.GetTempPath(),
+			$"weaponanim-output-{Guid.NewGuid():N}",
+			"Assets" );
+		var document = WeaponAnimationDocument.CreateDefault( "Output Test" );
+		var defaultOutput = AssetGenerationService.ResolveOutputRootForContentRoot(
+			document,
+			contentRoot );
+		Equal(
+			report,
+			Path.GetFullPath( Path.Combine(
+				contentRoot,
+				"weapons",
+				"output_test",
+				"viewmodel" ) ),
+			defaultOutput,
+			"Default generation output must resolve beneath Assets even before the folder exists." );
+
+		document.Output.OutputFolder = "/weapons/custom/viewmodel";
+		Equal(
+			report,
+			Path.GetFullPath( Path.Combine(
+				contentRoot,
+				"weapons",
+				"custom",
+				"viewmodel" ) ),
+			AssetGenerationService.ResolveOutputRootForContentRoot( document, contentRoot ),
+			"A leading asset slash must remain a project-relative output path." );
+
+		document.Output.OutputFolder = "../outside";
+		var rejectedEscape = false;
+		try
+		{
+			AssetGenerationService.ResolveOutputRootForContentRoot( document, contentRoot );
+		}
+		catch ( InvalidOperationException )
+		{
+			rejectedEscape = true;
+		}
+		Check(
+			report,
+			rejectedEscape,
+			"Generation output must reject paths that escape the project's Assets folder." );
+
+		document.Output.OutputFolder = "C:/outside";
+		var rejectedDrive = false;
+		try
+		{
+			AssetGenerationService.ResolveOutputRootForContentRoot( document, contentRoot );
+		}
+		catch ( InvalidOperationException )
+		{
+			rejectedDrive = true;
+		}
+		Check(
+			report,
+			rejectedDrive,
+			"Generation output must reject absolute drive paths on every host platform." );
+
+		document.Output = null!;
+		Equal(
+			report,
+			Path.GetFullPath( Path.Combine(
+				contentRoot,
+				"weapons",
+				"output_test",
+				"viewmodel" ) ),
+			AssetGenerationService.ResolveOutputRootForContentRoot( document, contentRoot ),
+			"Generation must repair missing output settings instead of throwing." );
+	}
+
+	private static void TestGeneratedFileRemoval( WeaponAnimatorSelfTestReport report )
+	{
+		var root = Path.Combine(
+			Path.GetTempPath(),
+			$"weaponanim-removal-{Guid.NewGuid():N}" );
+		Directory.CreateDirectory( root );
+		try
+		{
+			var host = Path.Combine( root, "weapon_host.vmdl" );
+			var clip = Path.Combine( root, "weapon_idle.dmx" );
+			var graph = Path.Combine( root, "weapon.vanmgrph" );
+			var prefab = Path.Combine( root, "v_weapon.prefab" );
+			foreach ( var file in new[] { host, clip, graph, prefab } )
+			{
+				File.WriteAllText( file, "generated" );
+				File.WriteAllText( $"{file}_c", "compiled" );
+			}
+
+			AssetGenerationService.DeleteGeneratedFiles( [clip, host, graph, prefab] );
+
+			Check(
+				report,
+				!File.Exists( host ) && !File.Exists( $"{host}_c" ),
+				"Removing a generated asset must take its compiled artifact with it." );
+			Check(
+				report,
+				!File.Exists( clip ) && !File.Exists( graph ) && !File.Exists( prefab ),
+				"Every listed generated file must be removed." );
+
+			// The dependant .vmdl has to be gone before its .dmx sources, or the asset system
+			// keeps recompiling a model whose animation dependencies stopped existing.
+			File.WriteAllText( host, "generated" );
+			File.WriteAllText( clip, "generated" );
+			var ordered = AssetGenerationService.OrderForRemoval( [clip, host] ).ToList();
+			Equal(
+				report,
+				host,
+				ordered[0],
+				"Compiled dependants must be removed before the sources they consume." );
+			var lifecycleFiles = new[]
+			{
+				"weapon_sequence_idle.dmx",
+				"weapon_vm_bootstrap.vmdl",
+				"weapon.vanmgrph",
+				"weapon_vm.vmdl",
+				"v_weapon.prefab"
+			};
+			var writeOrder = AssetGenerationService.OrderForWrite( lifecycleFiles ).ToList();
+			Equal(
+				report,
+				string.Join( "|", lifecycleFiles ),
+				string.Join( "|", writeOrder ),
+				"Generated sources must appear in dependency order so automatic compilation never observes a missing preview host." );
+			var removeOrder = AssetGenerationService.OrderForRemoval( lifecycleFiles ).ToList();
+			Equal(
+				report,
+				"v_weapon.prefab|weapon_vm.vmdl|weapon.vanmgrph|weapon_vm_bootstrap.vmdl|weapon_sequence_idle.dmx",
+				string.Join( "|", removeOrder ),
+				"Generated consumers must be removed in reverse dependency order." );
+			Check(
+				report,
+				!AssetGenerationService.ShouldDeleteCreatedFileOnRollback(
+					"weapon_sprint.dmx",
+					previouslyOwned: true ),
+				"Rollback must retain a recreated owned DMX dependency needed by an older host." );
+			Check(
+				report,
+				AssetGenerationService.ShouldDeleteCreatedFileOnRollback(
+					"weapon_vm.vmdl",
+					previouslyOwned: true )
+				&& AssetGenerationService.ShouldDeleteCreatedFileOnRollback(
+					"new_clip.dmx",
+					previouslyOwned: false ),
+				"Rollback must remove failed compiled consumers and newly introduced dependencies." );
+
+			var freshnessSource = Path.Combine( root, "freshness.vmdl" );
+			var freshnessCompiled = freshnessSource + "_c";
+			File.WriteAllText( freshnessSource, "source" );
+			File.WriteAllText( freshnessCompiled, "compiled" );
+			var now = DateTime.UtcNow;
+			File.SetLastWriteTimeUtc( freshnessSource, now );
+			File.SetLastWriteTimeUtc( freshnessCompiled, now.AddSeconds( 1 ) );
+			Check(
+				report,
+				AssetGenerationService.IsFreshCompiledArtifact(
+					freshnessSource,
+					freshnessCompiled ),
+				"A newly written compiled artifact must complete generation even while its managed Asset wrapper is stale." );
+			File.SetLastWriteTimeUtc( freshnessCompiled, now.AddSeconds( -10 ) );
+			Check(
+				report,
+				!AssetGenerationService.IsFreshCompiledArtifact(
+					freshnessSource,
+					freshnessCompiled ),
+				"An artifact older than its regenerated source must never be accepted as compile success." );
+		}
+		finally
+		{
+			Directory.Delete( root, true );
+		}
+	}
+
 	private static void TestRebase( WeaponAnimatorSelfTestReport report )
 	{
 		var document = WeaponAnimationDocument.CreateDefault();
@@ -2260,25 +2496,6 @@ public static class WeaponAnimatorSelfTests
 		CalibrationRebaser.RebaseAnimationData( document, previous );
 		Near( report, 12, rootTrack.Keys[0].Position.x, 0.001f, "Root keys must retain their placement-relative offset." );
 	}
-
-	private static void TestSmdOutput( WeaponAnimatorSelfTestReport report )
-	{
-		var skeleton = new HostSkeleton();
-		skeleton.Add( Bone( "root", "", Vector3.Zero ) );
-		skeleton.Add( Bone( "weapon_root", "root", Vector3.Forward ) );
-		var document = WeaponAnimationDocument.CreateDefault();
-		document.Binding.Configuration = GripConfiguration.OneHanded;
-		var clip = document.EnsureClip( WeaponClipRole.Idle );
-		clip.Duration = 1;
-		clip.SampleRate = 30;
-		clip.Readiness = ClipReadiness.Ready;
-
-		var reference = SmdWriter.WriteReference( skeleton );
-		Check( report, reference.Contains( "triangles\nmaterials/dev/gray_25.vmat" ), "Reference SMD must contain the compiler carrier triangle." );
-		var animation = SmdWriter.WriteClip( document, skeleton, clip );
-		Check( report, animation.Contains( "time 30" ), "A one-second 30 fps clip must export its final frame." );
-			Check( report, !animation.Contains( "NaN", StringComparison.OrdinalIgnoreCase ), "SMD output must contain finite transforms." );
-		}
 
 	private static void TestDmxOutput( WeaponAnimatorSelfTestReport report )
 	{
@@ -2307,7 +2524,73 @@ public static class WeaponAnimatorSelfTests
 			report,
 			first.Contains( "materials/tools/toolsinvisible.vmat", StringComparison.Ordinal ),
 			"The bone-retention carrier must use an invisible material." );
+		Check(
+			report,
+			first.Contains( "\"forwardParity\" \"int\" \"1\"", StringComparison.Ordinal )
+				&& !first.Contains( "\"forwardParity\" \"int\" \"-2\"", StringComparison.Ordinal ),
+			"Reference DMX must use the Source 2 Z-up axis parity expected by ModelDoc." );
 		Equal( report, first, second, "DMX host references must be deterministic." );
+		var document = WeaponAnimationDocument.CreateDefault();
+		document.Binding.Configuration = GripConfiguration.OneHanded;
+		var clip = document.EnsureClip( WeaponClipRole.Idle );
+		clip.Duration = 1;
+		clip.SampleRate = 30;
+		var animation = DmxWriter.WriteAnimation( document, skeleton, clip );
+		Check(
+			report,
+			animation.Contains( "\"DmeChannelsClip\"", StringComparison.Ordinal )
+				&& animation.Contains( "\"DmeVector3LogLayer\"", StringComparison.Ordinal )
+				&& animation.Contains( "\"DmeQuaternionLogLayer\"", StringComparison.Ordinal )
+				&& animation.Contains( "\"DmeFloatLogLayer\"", StringComparison.Ordinal ),
+			"DMX animation output must contain position, rotation, and scale channels." );
+		Check(
+			report,
+			animation.Contains( "\"DmeJoint\"", StringComparison.Ordinal )
+				&& !animation.Contains( "\"DmeDag\"", StringComparison.Ordinal ),
+			"Animation skeleton entries must be Source 2 joints rather than generic DAG nodes." );
+		Check(
+			report,
+			animation.Contains( "\"DmeTransformList\"", StringComparison.Ordinal )
+				&& animation.Contains( "\"baseStates\" \"element_array\"", StringComparison.Ordinal ),
+			"Animation DMX must include a bind transform list for ModelDoc sequence import." );
+		Check(
+			report,
+			animation.Contains( "\"mode\" \"int\" \"1\"", StringComparison.Ordinal ),
+			"Animation channels must use the Source 2 exporter channel mode." );
+		Check(
+			report,
+			animation.Contains( "\"jointList\" \"element_array\"", StringComparison.Ordinal )
+				&& animation.Contains(
+					"\"element\" \"" + DmxAnimationJointIdForTest( clip, 0 ) + "\"",
+					StringComparison.Ordinal ),
+			"Animation DMX must register every animated joint with its model." );
+		Check(
+			report,
+			animation.Contains( "\t\t\"1\"\n", StringComparison.Ordinal ),
+			"A one-second animation must include its final sample time." );
+		Check(
+			report,
+			!animation.Contains( "NaN", StringComparison.OrdinalIgnoreCase )
+				&& !animation.Contains( "Infinity", StringComparison.OrdinalIgnoreCase ),
+			"DMX animation output must contain finite transforms." );
+		Check(
+			report,
+			animation.Contains( "\"forwardParity\" \"int\" \"1\"", StringComparison.Ordinal )
+				&& !animation.Contains( "\"forwardParity\" \"int\" \"-2\"", StringComparison.Ordinal ),
+			"Animation DMX must use the same Source 2 axis system as its host reference." );
+		Equal(
+			report,
+			animation,
+			DmxWriter.WriteAnimation( document, skeleton, clip ),
+			"DMX animation output must be deterministic." );
+		document.Manifest.Files.Add( new GeneratedFileRecord
+		{
+			RelativePath = "generated_sequence.dmx"
+		} );
+		Check(
+			report,
+			!Json.Serialize( document ).Contains( "\"Manifest\"", StringComparison.Ordinal ),
+			"The creative document must not serialize generated filenames as resource dependencies." );
 		var wrapper = ModelDocWriter.WriteSourceWrapper( "weapon.fbx", "root" );
 		Check(
 			report,
@@ -2317,14 +2600,41 @@ public static class WeaponAnimatorSelfTests
 		var host = ModelDocWriter.WriteHost(
 			"host_reference.dmx",
 			[],
-			"",
-			skeleton.Bones.Select( bone => bone.Name ) );
+			"weapon.vanmgrph",
+			skeleton.Bones.Select( bone => bone.Name ),
+			new HostWeaponMesh(
+				"weapon.fbx",
+				"root",
+				new Transform( Vector3.Zero, Rotation.Identity, Vector3.One * 0.6f ),
+				[] ),
+			[
+				new HostAttachment(
+					"muzzle",
+					"weapon_root",
+					Vector3.Forward * 10,
+					Rotation.Identity )
+			] );
 		Check(
 			report,
 			host.Contains( "target_bone = \"weapon_root\"", StringComparison.Ordinal )
 				&& host.Contains( "do_not_discard = true", StringComparison.Ordinal )
-				&& host.Contains( "materials/tools/toolsinvisible.vmat", StringComparison.Ordinal ),
-			"Host ModelDocs must explicitly preserve generated bones." );
+				&& host.Contains( "filename = \"weapon.fbx\"", StringComparison.Ordinal )
+				&& host.Contains( "import_scale = 0.6", StringComparison.Ordinal )
+				&& host.Contains( "anim_graph_name = \"weapon.vanmgrph\"", StringComparison.Ordinal )
+				&& host.Contains( "use_global_default = true", StringComparison.Ordinal )
+				&& host.Contains( "from = \"materials/tools/toolsinvisible.vmat\"", StringComparison.Ordinal )
+				&& host.Contains( "_class = \"Attachment\"", StringComparison.Ordinal )
+				&& host.Contains( "name = \"muzzle\"", StringComparison.Ordinal ),
+			"Host ModelDocs must preserve generated bones, safely handle imported materials, and contain the visible weapon, graph, and attachments." );
+		var skeletonOnlyHost = ModelDocWriter.WriteHost(
+			"host_reference.dmx",
+			[],
+			"",
+			skeleton.Bones.Select( bone => bone.Name ) );
+		Check(
+			report,
+			skeletonOnlyHost.Contains( "use_global_default = false", StringComparison.Ordinal ),
+			"A skeleton-only host must retain the invisible carrier material without substitution." );
 	}
 
 	private static void TestFilteredSourceWrapper( WeaponAnimatorSelfTestReport report )
@@ -2353,6 +2663,17 @@ public static class WeaponAnimatorSelfTests
 		return new Guid( bytes.AsSpan( 0, 16 ) ).ToString();
 	}
 
+	private static string DmxAnimationJointIdForTest(
+		WeaponAnimationClip clip,
+		int index )
+	{
+		var key =
+			$"SboxWeaponAnimator.DmxReference:animation:{clip.Id}:joint:{index}";
+		var bytes = System.Security.Cryptography.SHA256.HashData(
+			System.Text.Encoding.UTF8.GetBytes( key ) );
+		return new Guid( bytes.AsSpan( 0, 16 ) ).ToString();
+	}
+
 	private static void TestDeterministicOutput( WeaponAnimatorSelfTestReport report )
 	{
 		var document = ValidDocument();
@@ -2364,10 +2685,10 @@ public static class WeaponAnimatorSelfTests
 				var graphFrench = AnimGraphWriter.Write( document, "weapons/test/host.vmdl" );
 				var modelFrench = ModelDocWriter.WriteHost(
 					"host_reference.dmx",
-					[(idle, "idle.smd")],
+					[(idle, "idle.dmx")],
 					"weapon.vanmgrph",
 					["root", "weapon_root"] );
-			var prefabFrench = PrefabWriter.Write( document, "host.vmdl", "weapon.vmdl" );
+			var prefabFrench = PrefabWriter.Write( document, "host.vmdl" );
 
 			CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo( "en-US" );
 			Equal( report, graphFrench, AnimGraphWriter.Write( document, "weapons/test/host.vmdl" ), "AnimGraph output must be culture-independent." );
@@ -2376,11 +2697,11 @@ public static class WeaponAnimatorSelfTests
 					modelFrench,
 					ModelDocWriter.WriteHost(
 						"host_reference.dmx",
-						[(idle, "idle.smd")],
+						[(idle, "idle.dmx")],
 						"weapon.vanmgrph",
 						["root", "weapon_root"] ),
 				"ModelDoc output must be culture-independent." );
-			Equal( report, prefabFrench, PrefabWriter.Write( document, "host.vmdl", "weapon.vmdl" ), "Prefab output must be culture-independent." );
+			Equal( report, prefabFrench, PrefabWriter.Write( document, "host.vmdl" ), "Prefab output must be culture-independent." );
 			Equal( report, AnimGraphWriter.Id( "node:Root" ), AnimGraphWriter.Id( "node:Root" ), "Deterministic graph IDs must be stable." );
 		}
 		finally
@@ -2409,6 +2730,30 @@ public static class WeaponAnimatorSelfTests
 			"Missing action clips must use Idle sequence fallbacks." );
 		Check( report, graph.Contains( "m_name = \"b_attack\"" ), "Facepunch firearm parameters must be exposed." );
 		Check( report, graph.Contains( "m_name = \"reload_increment\"" ), "Standard reload tags must be declared." );
+
+		var skeleton = HostSkeletonBuilder.Build( document, includeArmProfile: false );
+		var generated = AssetGenerationService.BuildFiles(
+			document,
+			skeleton,
+			"weapons/test_weapon/viewmodel" );
+		var finalHost = generated["test_weapon_vm.vmdl"];
+		var bootstrapHost = generated["test_weapon_vm_bootstrap.vmdl"];
+		var generatedGraph = generated["test_weapon.vanmgrph"];
+		Check(
+			report,
+			finalHost.Contains(
+				"anim_graph_name = \"weapons/test_weapon/viewmodel/test_weapon.vanmgrph\"",
+				StringComparison.Ordinal )
+				&& bootstrapHost.Contains( "anim_graph_name = \"\"", StringComparison.Ordinal )
+				&& generatedGraph.Contains(
+					"m_previewModels = [ \"weapons/test_weapon/viewmodel/test_weapon_vm_bootstrap.vmdl\", ]",
+					StringComparison.Ordinal ),
+			"Generation must keep a permanent graph-free preview host while the final host always links its AnimGraph." );
+		Check(
+			report,
+			generated.ContainsKey( "test_weapon_sequence_idle.dmx" )
+				&& !generated.ContainsKey( "test_weapon_idle.dmx" ),
+			"Generated clips must use the stable sequence namespace instead of legacy dependency paths." );
 	}
 
 	private static void TestPartVisibility( WeaponAnimatorSelfTestReport report )
@@ -2451,34 +2796,43 @@ public static class WeaponAnimatorSelfTests
 		Near( report, idle.Duration, spans[^1].EndTime, 0.0001f, "The final visibility span must reach clip end." );
 
 		var skeleton = HostSkeletonBuilder.Build( document, includeArmProfile: false );
-		var before = SmdWriter.WriteClip( document, skeleton, idle );
+		var before = DmxWriter.WriteAnimation( document, skeleton, idle );
 		var graph = AnimGraphWriter.Write( document, "host.vmdl" );
-		var after = SmdWriter.WriteClip( document, skeleton, idle );
+		var after = DmxWriter.WriteAnimation( document, skeleton, idle );
 		Equal(
 			report,
 			before,
 			after,
-			"Visibility authoring must not alter exported skeletal transforms." );
+			"Visibility export must be deterministic and must not mutate authored transforms." );
+		Check(
+			report,
+			before.Contains( "\"DmeFloatLogLayer\"", StringComparison.Ordinal )
+				&& before.Contains( "\"0.0001\"", StringComparison.Ordinal ),
+			"Bone visibility must be baked into standard sequence scale channels." );
 		Check(
 			report,
 			graph.Contains( WeaponVisibilityEvaluator.VisibleTag( part.Id ) )
 				&& graph.Contains( WeaponVisibilityEvaluator.HiddenTag( part.Id ) ),
 			"Generated AnimGraphs must declare both visibility states for every part." );
 
-		var prefab = PrefabWriter.Write( document, "host.vmdl", "weapon.vmdl" );
+		var prefab = PrefabWriter.Write( document, "host.vmdl" );
 		Check(
 			report,
-			prefab.Contains( "SboxWeaponAnimator.WeaponPartVisibilityController" )
-				&& prefab.Contains( "\"UseAnimGraphTags\": true" )
-				&& prefab.Contains( part.Id.ToString(), StringComparison.OrdinalIgnoreCase ),
-			"Generated prefabs must contain the runtime visibility controller and authored part metadata." );
+			!prefab.Contains( "WeaponPartVisibilityController", StringComparison.Ordinal )
+				&& !prefab.Contains( "\"Name\": \"source_weapon\"", StringComparison.Ordinal )
+				&& prefab.Contains( "\"Model\": \"host.vmdl\"", StringComparison.Ordinal )
+				&& prefab.Contains( "\"GameLayer\": true", StringComparison.Ordinal )
+				&& Count( prefab, "\"__type\": \"Sandbox.SkinnedModelRenderer\"" ) == 2
+				&& prefab.Contains( "\"Name\": \"muzzle\"", StringComparison.Ordinal )
+				&& prefab.Contains( "\"Name\": \"eject\"", StringComparison.Ordinal ),
+			"Generated prefabs must use one visible host renderer plus bone-merged arms and explicit output anchors, with no custom controller." );
 		document.Output.GenerateGraph = false;
-		var graphFreePrefab = PrefabWriter.Write( document, "host.vmdl", "weapon.vmdl" );
+		var graphFreePrefab = PrefabWriter.Write( document, "host.vmdl" );
 		Check(
 			report,
-			graphFreePrefab.Contains( "\"UseAnimGraphTags\": false" )
-				&& graphFreePrefab.Contains( "\"SequenceName\": \"idle\"" ),
-			"Graph-free prefabs must serialize direct sequence visibility playback data." );
+			graphFreePrefab.Contains( "\"UseAnimGraph\": false", StringComparison.Ordinal )
+				&& !graphFreePrefab.Contains( "WeaponPartVisibilityController", StringComparison.Ordinal ),
+			"Graph-free prefabs must remain standard and disable AnimGraph playback." );
 		document.Output.GenerateGraph = true;
 
 		var controller = new WeaponAnimatorController();
@@ -2499,8 +2853,9 @@ public static class WeaponAnimatorSelfTests
 		var invalid = WeaponAnimationValidator.ValidateForGeneration( document );
 		Check(
 			report,
-			invalid.Issues.Any( x => x.Code == "visibility.bodygroup_missing" ),
-			"Generation validation must reject an unnamed bodygroup channel." );
+			invalid.Issues.Any( x => x.Code == "visibility.bodygroup_missing" )
+				&& invalid.Issues.Any( x => x.Code == "visibility.bodygroup_export" ),
+			"Generation validation must reject bodygroup visibility until it can be baked into a standard prefab." );
 	}
 
 	private static WeaponAnimationDocument ValidDocument()
@@ -2531,6 +2886,8 @@ public static class WeaponAnimatorSelfTests
 		document.Calibration.SetAnchor( Anchor( AnchorKind.Grip, new Vector3( 1, 0, 0 ) ) );
 		document.Calibration.SetAnchor( Anchor( AnchorKind.RearBore, Vector3.Zero ) );
 		document.Calibration.SetAnchor( Anchor( AnchorKind.FrontBore, Vector3.Forward ) );
+		document.Calibration.SetAnchor( Anchor( AnchorKind.Muzzle, new Vector3( 12, 0, 1 ) ) );
+		document.Calibration.SetAnchor( Anchor( AnchorKind.Eject, new Vector3( 4, -1, 2 ) ) );
 		document.Calibration.Confirmed = true;
 		document.Calibration.Snapshot = new CalibrationSnapshot();
 		document.EnsureClip( WeaponClipRole.Idle ).Readiness = ClipReadiness.Ready;

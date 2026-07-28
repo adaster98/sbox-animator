@@ -251,7 +251,7 @@ public sealed class WeaponSourceImporter
 		return Path.GetRelativePath( GetContentRoot(), absolute ).Replace( '\\', '/' );
 	}
 
-	private static string GetContentRoot()
+	internal static string GetContentRoot()
 	{
 		var root = global::Editor.FileSystem.Content.GetFullPath( "/" );
 		if ( string.IsNullOrWhiteSpace( root ) )

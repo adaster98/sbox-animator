@@ -14,6 +14,221 @@ public static class DmxWriter
 	private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
 	private const string CarrierMaterial = "materials/tools/toolsinvisible.vmat";
 
+	public static string WriteAnimation(
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton,
+		WeaponAnimationClip clip )
+	{
+		if ( skeleton.Bones.Count == 0 )
+			throw new InvalidOperationException( "The animation host skeleton contains no bones." );
+
+		var sampleRate = MathF.Max( clip.SampleRate, 1.0f );
+		var frameCount = Math.Max( 1, (int)MathF.Round( clip.Duration * sampleRate ) );
+		var times = new string[frameCount + 1];
+		var poses = new EvaluatedPose[frameCount + 1];
+		for ( var frame = 0; frame <= frameCount; frame++ )
+		{
+			var time = MathF.Min( frame / sampleRate, clip.Duration );
+			times[frame] = F( time );
+			poses[frame] = AnimationPoseEvaluator.Evaluate( document, skeleton, clip, time );
+			ApplyBoneVisibility( document, skeleton, clip, time, poses[frame] );
+		}
+
+		var prefix = $"animation:{clip.Id}";
+		var rootId = Id( $"{prefix}:root" );
+		var modelId = Id( $"{prefix}:model" );
+		var modelTransformId = Id( $"{prefix}:model-transform" );
+		var baseStateId = Id( $"{prefix}:base-state" );
+		var baseModelTransformId = Id( $"{prefix}:base-model-transform" );
+		var animationListId = Id( $"{prefix}:animation-list" );
+		var clipId = Id( $"{prefix}:clip" );
+		var timeFrameId = Id( $"{prefix}:time-frame" );
+		var builder = new StringBuilder();
+
+		builder.AppendLine( "<!-- dmx encoding keyvalues2 4 format model 22 -->" );
+		builder.AppendLine( "\"DmElement\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", rootId );
+		Attribute( builder, 1, "name", "string", "root" );
+		Attribute( builder, 1, "skeleton", "element", modelId );
+		Attribute( builder, 1, "animationList", "element", animationListId );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeModel\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", modelId );
+		Attribute( builder, 1, "name", "string", "weapon_animation_host" );
+		Attribute( builder, 1, "transform", "element", modelTransformId );
+		Attribute( builder, 1, "shape", "element", "" );
+		Attribute( builder, 1, "visible", "bool", "1" );
+		ElementArray(
+			builder,
+			1,
+			"children",
+			skeleton.Bones
+				.Where( bone => string.IsNullOrWhiteSpace( bone.ParentName )
+					|| !skeleton.ByName.ContainsKey( bone.ParentName ) )
+				.Select( bone => AnimationJointId( prefix, bone.Index ) ) );
+		ElementArray(
+			builder,
+			1,
+			"jointList",
+			new[] { modelId }.Concat(
+				skeleton.Bones.Select( bone => AnimationJointId( prefix, bone.Index ) ) ) );
+		ElementArray( builder, 1, "baseStates", [baseStateId] );
+		Attribute( builder, 1, "upAxis", "string", "Z" );
+		builder.AppendLine( "\t\"axisSystem\" \"DmeAxisSystem\"" );
+		builder.AppendLine( "\t{" );
+		Attribute( builder, 2, "id", "elementid", Id( $"{prefix}:axis-system" ) );
+		Attribute( builder, 2, "name", "string", "" );
+		Attribute( builder, 2, "upAxis", "int", "3" );
+		Attribute( builder, 2, "forwardParity", "int", "1" );
+		Attribute( builder, 2, "coordSys", "int", "0" );
+		builder.AppendLine( "\t}" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		foreach ( var bone in skeleton.Bones )
+			WriteAnimationJoint( builder, skeleton, bone, prefix );
+
+		ExternalTransformElement( builder, modelTransformId, "model", Transform.Zero );
+		builder.AppendLine();
+
+		foreach ( var bone in skeleton.Bones )
+		{
+			ExternalTransformElement(
+				builder,
+				AnimationTransformId( prefix, bone.Index ),
+				bone.Name,
+				skeleton.GetBindLocal( bone ) );
+			builder.AppendLine();
+		}
+
+		ExternalTransformElement( builder, baseModelTransformId, "model", Transform.Zero );
+		builder.AppendLine();
+		foreach ( var bone in skeleton.Bones )
+		{
+			ExternalTransformElement(
+				builder,
+				AnimationBaseTransformId( prefix, bone.Index ),
+				bone.Name,
+				skeleton.GetBindLocal( bone ) );
+			builder.AppendLine();
+		}
+
+		builder.AppendLine( "\"DmeTransformList\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", baseStateId );
+		Attribute( builder, 1, "name", "string", "base" );
+		ElementArray(
+			builder,
+			1,
+			"transforms",
+			new[] { baseModelTransformId }.Concat(
+				skeleton.Bones.Select( bone =>
+					AnimationBaseTransformId( prefix, bone.Index ) ) ) );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeAnimationList\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", animationListId );
+		Attribute( builder, 1, "name", "string", clip.Name );
+		ElementArray( builder, 1, "animations", [clipId] );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeChannelsClip\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", clipId );
+		Attribute( builder, 1, "name", "string", WeaponAnimationNames.SequenceName( clip ) );
+		Attribute( builder, 1, "timeFrame", "element", timeFrameId );
+		Attribute( builder, 1, "color", "color", "0 0 0 0" );
+		Attribute( builder, 1, "text", "string", "" );
+		Attribute( builder, 1, "mute", "bool", "0" );
+		ElementArray( builder, 1, "trackGroups", [] );
+		Attribute( builder, 1, "displayScale", "float", "1" );
+		ElementArray(
+			builder,
+			1,
+			"channels",
+			skeleton.Bones.SelectMany( bone => new[]
+			{
+				AnimationChannelId( prefix, bone.Index, "position" ),
+				AnimationChannelId( prefix, bone.Index, "orientation" ),
+				AnimationChannelId( prefix, bone.Index, "scale" )
+			} ) );
+		Attribute( builder, 1, "frameRate", "float", F( sampleRate ) );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeTimeFrame\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", timeFrameId );
+		Attribute( builder, 1, "name", "string", "timeFrame" );
+		Attribute( builder, 1, "start", "time", "0" );
+		Attribute( builder, 1, "duration", "time", F( clip.Duration ) );
+		Attribute( builder, 1, "offset", "time", "0" );
+		Attribute( builder, 1, "scale", "float", "1" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		foreach ( var bone in skeleton.Bones )
+		{
+			var values = poses.Select( pose => pose.Local[bone.Name] ).ToArray();
+			WriteVectorChannel(
+				builder,
+				prefix,
+				bone,
+				"position",
+				times,
+				values.Select( value => Vector( value.Position ) ).ToArray() );
+			WriteQuaternionChannel(
+				builder,
+				prefix,
+				bone,
+				times,
+				values.Select( value => Quaternion( value.Rotation.Normal ) ).ToArray() );
+			WriteFloatChannel(
+				builder,
+				prefix,
+				bone,
+				times,
+				values.Select( value => F( value.Scale.x ) ).ToArray() );
+		}
+
+		return builder.ToString();
+	}
+
+	private static void ApplyBoneVisibility(
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton,
+		WeaponAnimationClip clip,
+		float time,
+		EvaluatedPose pose )
+	{
+		foreach ( var part in document.Rig.VisibilityParts.Where( x =>
+			x.RenderMode == VisibilityRenderMode.BoneBranch
+			&& !WeaponVisibilityEvaluator.Evaluate( x, clip, time ) ) )
+		{
+			var definition = document.Rig.FindBone( part.BoneId )
+				?? document.Rig.FindBone( part.BoneName );
+			var boneName = definition is not null
+				&& definition.Id.Equals(
+					document.Rig.SourceSkeletonRootId,
+					StringComparison.OrdinalIgnoreCase )
+					? "weapon_root"
+					: definition?.Name ?? part.BoneName;
+			if ( !skeleton.ByName.ContainsKey( boneName )
+				|| !pose.Local.TryGetValue( boneName, out var local ) )
+				continue;
+
+			// Bone visibility is baked into the sequence, keeping generated prefabs component-free.
+			pose.Local[boneName] = local.WithScale( local.Scale * 0.0001f );
+		}
+	}
+
 	public static string WriteReference( HostSkeleton skeleton )
 	{
 		if ( skeleton.Bones.Count == 0 )
@@ -62,7 +277,7 @@ public static class DmxWriter
 		Attribute( builder, 2, "id", "elementid", Id( "axis-system" ) );
 		Attribute( builder, 2, "name", "string", "" );
 		Attribute( builder, 2, "upAxis", "int", "3" );
-		Attribute( builder, 2, "forwardParity", "int", "-2" );
+		Attribute( builder, 2, "forwardParity", "int", "1" );
 		Attribute( builder, 2, "coordSys", "int", "0" );
 		builder.AppendLine( "\t}" );
 		builder.AppendLine( "}" );
@@ -108,6 +323,207 @@ public static class DmxWriter
 
 		WriteVertexData( builder, vertexDataId, skeleton );
 		return builder.ToString();
+	}
+
+	private static void WriteAnimationJoint(
+		StringBuilder builder,
+		HostSkeleton skeleton,
+		HostBone bone,
+		string prefix )
+	{
+		builder.AppendLine( "\"DmeJoint\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", AnimationJointId( prefix, bone.Index ) );
+		Attribute( builder, 1, "name", "string", bone.Name );
+		Attribute(
+			builder,
+			1,
+			"transform",
+			"element",
+			AnimationTransformId( prefix, bone.Index ) );
+		Attribute( builder, 1, "shape", "element", "" );
+		Attribute( builder, 1, "visible", "bool", "1" );
+		ElementArray(
+			builder,
+			1,
+			"children",
+			skeleton.Bones
+				.Where( child => child.ParentName.Equals(
+					bone.Name,
+					StringComparison.OrdinalIgnoreCase ) )
+				.Select( child => AnimationJointId( prefix, child.Index ) ) );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	private static void WriteVectorChannel(
+		StringBuilder builder,
+		string prefix,
+		HostBone bone,
+		string attribute,
+		string[] times,
+		string[] values )
+	{
+		var channelId = AnimationChannelId( prefix, bone.Index, attribute );
+		var logId = Id( $"{prefix}:log:{bone.Index}:{attribute}" );
+		var layerId = Id( $"{prefix}:layer:{bone.Index}:{attribute}" );
+		var transformId = AnimationTransformId( prefix, bone.Index );
+
+		WriteChannelHeader(
+			builder,
+			channelId,
+			$"{bone.Name}_p",
+			transformId,
+			"position",
+			logId );
+		builder.AppendLine( "\"DmeVector3Log\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", logId );
+		Attribute( builder, 1, "name", "string", "vector3 log" );
+		ElementArray( builder, 1, "layers", [layerId] );
+		Attribute( builder, 1, "curveinfo", "element", "" );
+		Attribute( builder, 1, "usedefaultvalue", "bool", "0" );
+		Attribute( builder, 1, "defaultvalue", "vector3", values[0] );
+		TimeArray( builder, 1, "bookmarksX", [] );
+		TimeArray( builder, 1, "bookmarksY", [] );
+		TimeArray( builder, 1, "bookmarksZ", [] );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeVector3LogLayer\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", layerId );
+		Attribute( builder, 1, "name", "string", "vector3 log" );
+		TimeArray( builder, 1, "times", times );
+		IntArray( builder, 1, "curvetypes", [] );
+		VectorArray( builder, 1, "values", "vector3_array", values );
+		Attribute( builder, 1, "compressed", "binary", "" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	private static void WriteQuaternionChannel(
+		StringBuilder builder,
+		string prefix,
+		HostBone bone,
+		string[] times,
+		string[] values )
+	{
+		var attribute = "orientation";
+		var channelId = AnimationChannelId( prefix, bone.Index, attribute );
+		var logId = Id( $"{prefix}:log:{bone.Index}:{attribute}" );
+		var layerId = Id( $"{prefix}:layer:{bone.Index}:{attribute}" );
+		var transformId = AnimationTransformId( prefix, bone.Index );
+
+		WriteChannelHeader(
+			builder,
+			channelId,
+			$"{bone.Name}_o",
+			transformId,
+			attribute,
+			logId );
+		builder.AppendLine( "\"DmeQuaternionLog\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", logId );
+		Attribute( builder, 1, "name", "string", "quaternion log" );
+		ElementArray( builder, 1, "layers", [layerId] );
+		Attribute( builder, 1, "curveinfo", "element", "" );
+		Attribute( builder, 1, "usedefaultvalue", "bool", "0" );
+		Attribute( builder, 1, "defaultvalue", "quaternion", values[0] );
+		TimeArray( builder, 1, "bookmarksX", [] );
+		TimeArray( builder, 1, "bookmarksY", [] );
+		TimeArray( builder, 1, "bookmarksZ", [] );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeQuaternionLogLayer\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", layerId );
+		Attribute( builder, 1, "name", "string", "quaternion log" );
+		TimeArray( builder, 1, "times", times );
+		IntArray( builder, 1, "curvetypes", [] );
+		VectorArray( builder, 1, "values", "quaternion_array", values );
+		Attribute( builder, 1, "compressed", "binary", "" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	private static void WriteFloatChannel(
+		StringBuilder builder,
+		string prefix,
+		HostBone bone,
+		string[] times,
+		string[] values )
+	{
+		const string attribute = "scale";
+		var channelId = AnimationChannelId( prefix, bone.Index, attribute );
+		var logId = Id( $"{prefix}:log:{bone.Index}:{attribute}" );
+		var layerId = Id( $"{prefix}:layer:{bone.Index}:{attribute}" );
+		var transformId = AnimationTransformId( prefix, bone.Index );
+
+		WriteChannelHeader(
+			builder,
+			channelId,
+			$"{bone.Name}_s",
+			transformId,
+			attribute,
+			logId );
+		builder.AppendLine( "\"DmeFloatLog\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", logId );
+		Attribute( builder, 1, "name", "string", "float log" );
+		ElementArray( builder, 1, "layers", [layerId] );
+		Attribute( builder, 1, "curveinfo", "element", "" );
+		Attribute( builder, 1, "usedefaultvalue", "bool", "0" );
+		Attribute( builder, 1, "defaultvalue", "float", values[0] );
+		TimeArray( builder, 1, "bookmarks", [] );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+
+		builder.AppendLine( "\"DmeFloatLogLayer\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", layerId );
+		Attribute( builder, 1, "name", "string", "float log" );
+		TimeArray( builder, 1, "times", times );
+		IntArray( builder, 1, "curvetypes", [] );
+		VectorArray( builder, 1, "values", "float_array", values );
+		Attribute( builder, 1, "compressed", "binary", "" );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
+	}
+
+	private static void WriteChannelHeader(
+		StringBuilder builder,
+		string channelId,
+		string name,
+		string transformId,
+		string attribute,
+		string logId )
+	{
+		builder.AppendLine( "\"DmeChannel\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", channelId );
+		Attribute( builder, 1, "name", "string", name );
+		Attribute( builder, 1, "fromElement", "element", "" );
+		Attribute(
+			builder,
+			1,
+			"fromAttribute",
+			"string",
+			attribute switch
+			{
+				"position" => "valuePosition",
+				"orientation" => "valueOrientation",
+				_ => "value"
+			} );
+		Attribute( builder, 1, "fromIndex", "int", "0" );
+		Attribute( builder, 1, "toElement", "element", transformId );
+		Attribute( builder, 1, "toAttribute", "string", attribute );
+		Attribute( builder, 1, "toIndex", "int", "0" );
+		Attribute( builder, 1, "mode", "int", "1" );
+		Attribute( builder, 1, "log", "element", logId );
+		builder.AppendLine( "}" );
+		builder.AppendLine();
 	}
 
 	private static void WriteJoint( StringBuilder builder, HostSkeleton skeleton, HostBone bone )
@@ -232,6 +648,22 @@ public static class DmxWriter
 		builder.Append( tabs ).AppendLine( "}" );
 	}
 
+	private static void ExternalTransformElement(
+		StringBuilder builder,
+		string id,
+		string name,
+		Transform transform )
+	{
+		builder.AppendLine( "\"DmeTransform\"" );
+		builder.AppendLine( "{" );
+		Attribute( builder, 1, "id", "elementid", id );
+		Attribute( builder, 1, "name", "string", name );
+		Attribute( builder, 1, "position", "vector3", Vector( transform.Position ) );
+		Attribute( builder, 1, "orientation", "quaternion", Quaternion( transform.Rotation.Normal ) );
+		Attribute( builder, 1, "scale", "float", F( transform.Scale.x ) );
+		builder.AppendLine( "}" );
+	}
+
 	private static void ElementArray(
 		StringBuilder builder,
 		int indent,
@@ -276,6 +708,9 @@ public static class DmxWriter
 	private static void FloatArray( StringBuilder builder, int indent, string name, float[] values ) =>
 		VectorArray( builder, indent, name, "float_array", values.Select( F ).ToArray() );
 
+	private static void TimeArray( StringBuilder builder, int indent, string name, string[] values ) =>
+		VectorArray( builder, indent, name, "time_array", values );
+
 	private static void VectorArray(
 		StringBuilder builder,
 		int indent,
@@ -311,6 +746,14 @@ public static class DmxWriter
 	}
 
 	private static string JointId( int index ) => Id( $"joint:{index}" );
+	private static string AnimationJointId( string prefix, int index ) =>
+		Id( $"{prefix}:joint:{index}" );
+	private static string AnimationTransformId( string prefix, int index ) =>
+		Id( $"{prefix}:transform:{index}" );
+	private static string AnimationBaseTransformId( string prefix, int index ) =>
+		Id( $"{prefix}:base-transform:{index}" );
+	private static string AnimationChannelId( string prefix, int index, string attribute ) =>
+		Id( $"{prefix}:channel:{index}:{attribute}" );
 
 	private static string Id( string key )
 	{
@@ -319,5 +762,9 @@ public static class DmxWriter
 	}
 
 	private static string F( float value ) => value.ToString( "0.######", Invariant );
+	private static string Vector( Vector3 value ) =>
+		$"{F( value.x )} {F( value.y )} {F( value.z )}";
+	private static string Quaternion( Rotation value ) =>
+		$"{F( value.x )} {F( value.y )} {F( value.z )} {F( value.w )}";
 	private static string Escape( string value ) => value.Replace( "\\", "\\\\" ).Replace( "\"", "\\\"" );
 }

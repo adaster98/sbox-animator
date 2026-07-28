@@ -4,8 +4,21 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using Sandbox;
 
 namespace SboxWeaponAnimator.Editor;
+
+public sealed record HostWeaponMesh(
+	string SourcePath,
+	string SourceRootBoneName,
+	Transform ImportTransform,
+	IReadOnlyList<string> ExcludedBranchRoots );
+
+public sealed record HostAttachment(
+	string Name,
+	string ParentBone,
+	Vector3 LocalPosition,
+	Rotation LocalRotation );
 
 public static class ModelDocWriter
 {
@@ -14,10 +27,12 @@ public static class ModelDocWriter
 		"format:modeldoc29:version{3cec427c-1b0e-4d48-a90a-0436f33a6041} -->";
 
 	public static string WriteHost(
-		string referenceSmd,
+		string referenceMesh,
 		IEnumerable<(WeaponAnimationClip Clip, string Source)> clips,
 		string animGraphPath,
-		IEnumerable<string> preservedBones )
+		IEnumerable<string> preservedBones,
+		HostWeaponMesh? weaponMesh = null,
+		IEnumerable<HostAttachment>? attachments = null )
 	{
 		var animationNodes = new StringBuilder();
 		foreach ( var item in clips.OrderBy( x => x.Clip.Name ) )
@@ -46,9 +61,12 @@ public static class ModelDocWriter
 									take = 0
 									reverse = false
 								},
-				""" );
+			""" );
 		}
 
+		var weaponMeshNode = BuildWeaponMeshNode( weaponMesh );
+		var materialGroup = BuildMaterialGroup( weaponMesh is not null );
+		var attachmentList = BuildAttachmentList( attachments );
 		var boneMarkupNodes = new StringBuilder();
 		foreach ( var boneName in preservedBones
 			.Where( name => !string.IsNullOrWhiteSpace( name ) )
@@ -79,12 +97,7 @@ public static class ModelDocWriter
 							_class = "MaterialGroupList"
 							children =
 							[
-								{
-									_class = "DefaultMaterialGroup"
-									remaps = [ ]
-									use_global_default = true
-									global_default_material = "materials/tools/toolsinvisible.vmat"
-								},
+			{{materialGroup}}
 							]
 						},
 						{
@@ -94,7 +107,7 @@ public static class ModelDocWriter
 								{
 									_class = "RenderMeshFile"
 									name = "animation_host"
-									filename = "{{referenceSmd}}"
+									filename = "{{referenceMesh}}"
 									import_translation = [ 0.0, 0.0, 0.0 ]
 									import_rotation = [ 0.0, 0.0, 0.0 ]
 									import_scale = 1.0
@@ -104,6 +117,7 @@ public static class ModelDocWriter
 									parent_bone = ""
 									import_filter = { exclude_by_default = false exception_list = [ ] }
 								},
+			{{weaponMeshNode}}
 							]
 						},
 						{
@@ -113,6 +127,7 @@ public static class ModelDocWriter
 			{{animationNodes}}				]
 							default_root_bone_name = ""
 						},
+			{{attachmentList}}
 						{
 							_class = "BoneMarkupList"
 							children =
@@ -127,6 +142,144 @@ public static class ModelDocWriter
 					base_model_name = ""
 				}
 			}
+			""";
+	}
+
+	private static string BuildMaterialGroup( bool includesImportedWeapon )
+	{
+		if ( !includesImportedWeapon )
+		{
+			return """
+								{
+									_class = "DefaultMaterialGroup"
+									remaps = [ ]
+									use_global_default = false
+									global_default_material = "materials/default.vmat"
+								},
+				""";
+		}
+
+		// Raw interchange models commonly contain material labels rather than valid VMAT paths.
+		// Keep the host carrier invisible while safely substituting unresolved weapon materials.
+		return """
+								{
+									_class = "DefaultMaterialGroup"
+									remaps =
+									[
+										{
+											from = "materials/tools/toolsinvisible.vmat"
+											to = "materials/tools/toolsinvisible.vmat"
+										},
+									]
+									use_global_default = true
+									global_default_material = "materials/default.vmat"
+								},
+			""";
+	}
+
+	private static string BuildAttachmentList( IEnumerable<HostAttachment>? attachments )
+	{
+		var items = attachments?
+			.Where( x => !string.IsNullOrWhiteSpace( x.Name )
+				&& !string.IsNullOrWhiteSpace( x.ParentBone ) )
+			.OrderBy( x => x.Name, System.StringComparer.OrdinalIgnoreCase )
+			.ToArray() ?? [];
+		if ( items.Length == 0 )
+			return "";
+
+		var nodes = new StringBuilder();
+		foreach ( var attachment in items )
+		{
+			var angles = attachment.LocalRotation.Angles();
+			nodes.AppendLine( $$"""
+								{
+									_class = "Attachment"
+									name = "{{Escape( attachment.Name )}}"
+									parent_bone = "{{Escape( attachment.ParentBone )}}"
+									relative_origin = [ {{F( attachment.LocalPosition.x )}}, {{F( attachment.LocalPosition.y )}}, {{F( attachment.LocalPosition.z )}} ]
+									relative_angles = [ {{F( angles.pitch )}}, {{F( angles.yaw )}}, {{F( angles.roll )}} ]
+									weight = 1.0
+									ignore_rotation = false
+								},
+				""" );
+		}
+
+		return $$"""
+						{
+							_class = "AttachmentList"
+							children =
+							[
+			{{nodes}}				]
+						},
+
+			""";
+	}
+
+	private static string BuildWeaponMeshNode( HostWeaponMesh? source )
+	{
+		if ( source is null || string.IsNullOrWhiteSpace( source.SourcePath ) )
+			return "";
+
+		var modifiers = new StringBuilder();
+		if ( !string.IsNullOrWhiteSpace( source.SourceRootBoneName )
+			&& !source.SourceRootBoneName.Equals(
+				"weapon_root",
+				System.StringComparison.OrdinalIgnoreCase ) )
+		{
+			modifiers.AppendLine( $$"""
+											{
+												_class = "RenameBonePrefix"
+												prefix_to_match = "{{Escape( source.SourceRootBoneName )}}"
+												replacement = "weapon_root"
+												allow_nonmatching_bones = true
+											},
+				""" );
+		}
+
+		var excluded = source.ExcludedBranchRoots
+			.Where( x => !string.IsNullOrWhiteSpace( x ) )
+			.Distinct( System.StringComparer.OrdinalIgnoreCase )
+			.OrderBy( x => x, System.StringComparer.OrdinalIgnoreCase )
+			.ToArray();
+		if ( excluded.Length > 0 )
+		{
+			var names = string.Join(
+				"\n",
+				excluded.Select( x => $"\t\t\t\t\t\t\t\t\t\t\t\"{Escape( x )}\"," ) );
+			modifiers.AppendLine( $$"""
+											{
+												_class = "RemoveBoneAndChildren"
+												bone_names =
+												[
+				{{names}}
+												]
+											},
+				""" );
+		}
+
+		var children = modifiers.Length == 0
+			? ""
+			: $$"""
+										children =
+										[
+				{{modifiers}}							]
+
+				""";
+		var angles = source.ImportTransform.Rotation.Angles();
+		return $$"""
+								{
+									_class = "RenderMeshFile"
+									name = "weapon"
+									filename = "{{Escape( source.SourcePath )}}"
+									import_translation = [ {{F( source.ImportTransform.Position.x )}}, {{F( source.ImportTransform.Position.y )}}, {{F( source.ImportTransform.Position.z )}} ]
+									import_rotation = [ {{F( angles.pitch )}}, {{F( angles.yaw )}}, {{F( angles.roll )}} ]
+									import_scale = {{F( source.ImportTransform.Scale.x )}}
+									align_origin_x_type = "None"
+									align_origin_y_type = "None"
+									align_origin_z_type = "None"
+									parent_bone = ""
+									import_filter = { exclude_by_default = false exception_list = [ ] }
+			{{children}}					},
 			""";
 	}
 

@@ -298,6 +298,11 @@ public static class WeaponAnimationValidator
 
 			if ( part.RenderMode == VisibilityRenderMode.BodyGroup )
 			{
+				report.Add(
+					ValidationSeverity.Error,
+					"visibility.bodygroup_export",
+					$"{part.Name} uses bodygroup visibility, which cannot be baked into a standard generated viewmodel yet.",
+					part.Name );
 				if ( string.IsNullOrWhiteSpace( part.BodyGroupName ) )
 					report.Add(
 						ValidationSeverity.Error,
