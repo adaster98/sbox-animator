@@ -1,6 +1,7 @@
 #nullable enable annotations
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
@@ -13,6 +14,7 @@ public static class DmxWriter
 {
 	private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
 	private const string CarrierMaterial = "materials/tools/toolsinvisible.vmat";
+	private static readonly Vector3 BoneVisibilitySinkOffset = new( 0, 0, -8192 );
 
 	public static string WriteAnimation(
 		WeaponAnimationDocument document,
@@ -24,14 +26,16 @@ public static class DmxWriter
 
 		var sampleRate = MathF.Max( clip.SampleRate, 1.0f );
 		var frameCount = Math.Max( 1, (int)MathF.Round( clip.Duration * sampleRate ) );
+		var compilerBindLocal = skeleton.BuildCompilerBindLocalTransforms();
 		var times = new string[frameCount + 1];
-		var poses = new EvaluatedPose[frameCount + 1];
+		var poses = new IReadOnlyDictionary<string, Transform>[frameCount + 1];
 		for ( var frame = 0; frame <= frameCount; frame++ )
 		{
 			var time = MathF.Min( frame / sampleRate, clip.Duration );
 			times[frame] = F( time );
-			poses[frame] = AnimationPoseEvaluator.Evaluate( document, skeleton, clip, time );
-			ApplyBoneVisibility( document, skeleton, clip, time, poses[frame] );
+			var evaluated = AnimationPoseEvaluator.Evaluate( document, skeleton, clip, time );
+			ApplyBoneVisibility( document, skeleton, clip, time, evaluated );
+			poses[frame] = BuildCompilerPoseLocals( skeleton, evaluated.Local );
 		}
 
 		var prefix = $"animation:{clip.Id}";
@@ -101,7 +105,7 @@ public static class DmxWriter
 				builder,
 				AnimationTransformId( prefix, bone.Index ),
 				bone.Name,
-				skeleton.GetBindLocal( bone ) );
+				compilerBindLocal[bone.Name] );
 			builder.AppendLine();
 		}
 
@@ -113,7 +117,7 @@ public static class DmxWriter
 				builder,
 				AnimationBaseTransformId( prefix, bone.Index ),
 				bone.Name,
-				skeleton.GetBindLocal( bone ) );
+				compilerBindLocal[bone.Name] );
 			builder.AppendLine();
 		}
 
@@ -176,7 +180,9 @@ public static class DmxWriter
 
 		foreach ( var bone in skeleton.Bones )
 		{
-			var values = poses.Select( pose => pose.Local[bone.Name] ).ToArray();
+			var values = poses
+				.Select( pose => pose[bone.Name] )
+				.ToArray();
 			WriteVectorChannel(
 				builder,
 				prefix,
@@ -199,6 +205,133 @@ public static class DmxWriter
 		}
 
 		return builder.ToString();
+	}
+
+	internal static IReadOnlyDictionary<string, Transform> BuildCompilerPoseLocals(
+		HostSkeleton skeleton,
+		IReadOnlyDictionary<string, Transform> authoredLocal )
+	{
+		var authoredModel = BuildModelTransforms( skeleton, authoredLocal );
+		var exportLocal = new Dictionary<string, Transform>( StringComparer.OrdinalIgnoreCase );
+		var exportModel = new Dictionary<string, Transform>( StringComparer.OrdinalIgnoreCase );
+		var pending = skeleton.Bones.ToList();
+		while ( pending.Count > 0 )
+		{
+			var progressed = false;
+			for ( var i = pending.Count - 1; i >= 0; i-- )
+			{
+				var bone = pending[i];
+				if ( !authoredModel.TryGetValue( bone.Name, out var desiredModel ) )
+				{
+					pending.RemoveAt( i );
+					progressed = true;
+					continue;
+				}
+				if ( !string.IsNullOrWhiteSpace( bone.ParentName )
+					&& skeleton.ByName.ContainsKey( bone.ParentName )
+					&& !exportModel.ContainsKey( bone.ParentName ) )
+				{
+					continue;
+				}
+
+				var authored = authoredLocal[bone.Name];
+				var bind = skeleton.GetBindLocal( bone );
+				var relativeScale = new Vector3(
+					ScaleRatio( authored.Scale.x, bind.Scale.x ),
+					ScaleRatio( authored.Scale.y, bind.Scale.y ),
+					ScaleRatio( authored.Scale.z, bind.Scale.z ) );
+				Transform local;
+				if ( string.IsNullOrWhiteSpace( bone.ParentName )
+					|| !exportModel.TryGetValue( bone.ParentName, out var parent ) )
+				{
+					local = new Transform(
+						desiredModel.Position,
+						desiredModel.Rotation.Normal,
+						relativeScale );
+				}
+				else
+				{
+					local = new Transform(
+						parent.PointToLocal( desiredModel.Position ),
+						(parent.Rotation.Inverse * desiredModel.Rotation).Normal,
+						relativeScale );
+				}
+
+				exportLocal[bone.Name] = local;
+				exportModel[bone.Name] = string.IsNullOrWhiteSpace( bone.ParentName )
+					|| !exportModel.TryGetValue( bone.ParentName, out var exportParent )
+						? local
+						: ComposeLocal( exportParent, local );
+				pending.RemoveAt( i );
+				progressed = true;
+			}
+
+			if ( progressed )
+				continue;
+
+			throw new InvalidOperationException(
+				$"The animation host contains a cyclic pose hierarchy near '{pending[0].Name}'." );
+		}
+
+		return exportLocal;
+	}
+
+	private static IReadOnlyDictionary<string, Transform> BuildModelTransforms(
+		HostSkeleton skeleton,
+		IReadOnlyDictionary<string, Transform> local )
+	{
+		var model = new Dictionary<string, Transform>( StringComparer.OrdinalIgnoreCase );
+		var pending = skeleton.Bones.ToList();
+		while ( pending.Count > 0 )
+		{
+			var progressed = false;
+			for ( var i = pending.Count - 1; i >= 0; i-- )
+			{
+				var bone = pending[i];
+				if ( !local.TryGetValue( bone.Name, out var boneLocal ) )
+				{
+					pending.RemoveAt( i );
+					progressed = true;
+					continue;
+				}
+				if ( !string.IsNullOrWhiteSpace( bone.ParentName )
+					&& skeleton.ByName.ContainsKey( bone.ParentName )
+					&& !model.ContainsKey( bone.ParentName ) )
+				{
+					continue;
+				}
+
+				model[bone.Name] = string.IsNullOrWhiteSpace( bone.ParentName )
+					|| !model.TryGetValue( bone.ParentName, out var parent )
+						? boneLocal
+						: ComposeLocal( parent, boneLocal );
+				pending.RemoveAt( i );
+				progressed = true;
+			}
+
+			if ( progressed )
+				continue;
+
+			throw new InvalidOperationException(
+				$"The animation host contains a cyclic pose hierarchy near '{pending[0].Name}'." );
+		}
+
+		return model;
+	}
+
+	private static Transform ComposeLocal( Transform parent, Transform local ) => new(
+		parent.PointToWorld( local.Position ),
+		parent.Rotation * local.Rotation,
+		parent.Scale * local.Scale );
+
+	private static float ScaleRatio( float value, float bindValue )
+	{
+		if ( !float.IsFinite( value ) )
+			return 1.0f;
+
+		return float.IsFinite( bindValue ) && MathF.Abs( bindValue ) > 0.000001f
+			? value / bindValue
+			: value;
 	}
 
 	private static void ApplyBoneVisibility(
@@ -224,8 +357,11 @@ public static class DmxWriter
 				|| !pose.Local.TryGetValue( boneName, out var local ) )
 				continue;
 
-			// Bone visibility is baked into the sequence, keeping generated prefabs component-free.
-			pose.Local[boneName] = local.WithScale( local.Scale * 0.0001f );
+			// Some ModelDoc paths normalize animated bone scale. The off-screen translation keeps
+			// visibility native and deterministic even when the scale channel is discarded.
+			pose.Local[boneName] = local
+				.WithPosition( local.Position + BoneVisibilitySinkOffset )
+				.WithScale( local.Scale * 0.0001f );
 		}
 	}
 
@@ -243,6 +379,7 @@ public static class DmxWriter
 		var vertexDataId = Id( "vertex-data" );
 		var faceSetId = Id( "face-set" );
 		var materialId = Id( "material" );
+		var compilerBindLocal = skeleton.BuildCompilerBindLocalTransforms();
 		var builder = new StringBuilder();
 
 		builder.AppendLine( "<!-- dmx encoding keyvalues2 4 format model 22 -->" );
@@ -284,7 +421,7 @@ public static class DmxWriter
 		builder.AppendLine();
 
 		foreach ( var bone in skeleton.Bones )
-			WriteJoint( builder, skeleton, bone );
+			WriteJoint( builder, skeleton, bone, compilerBindLocal[bone.Name] );
 
 		builder.AppendLine( "\"DmeDag\"" );
 		builder.AppendLine( "{" );
@@ -526,7 +663,11 @@ public static class DmxWriter
 		builder.AppendLine();
 	}
 
-	private static void WriteJoint( StringBuilder builder, HostSkeleton skeleton, HostBone bone )
+	private static void WriteJoint(
+		StringBuilder builder,
+		HostSkeleton skeleton,
+		HostBone bone,
+		Transform bindLocal )
 	{
 		builder.AppendLine( "\"DmeJoint\"" );
 		builder.AppendLine( "{" );
@@ -537,7 +678,7 @@ public static class DmxWriter
 			1,
 			Id( $"joint-transform:{bone.Index}" ),
 			bone.Name,
-			skeleton.GetBindLocal( bone ) );
+			bindLocal );
 		Attribute( builder, 1, "visible", "bool", "1" );
 		ElementArray(
 			builder,

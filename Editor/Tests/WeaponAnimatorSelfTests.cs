@@ -546,11 +546,10 @@ public static class WeaponAnimatorSelfTests
 			"Compiled bind expectations must model ModelDoc's scale-one skeleton." );
 		Near(
 			report,
-			compilerRoot.PointToWorld(
-				rebuiltHierarchy.ByName["weapon_helper"].BindLocalTransform.Position ),
+			rebuiltHierarchy.ByName["weapon_helper"].BindModelTransform.Position,
 			compilerHelper.Position,
 			0.0001f,
-			"Compiled bind expectations must not propagate authored parent scale into child offsets." );
+			"Compiled bind expectations must preserve scale-baked physical child pivots." );
 	}
 
 	private static void TestRigBrowserGrouping( WeaponAnimatorSelfTestReport report )
@@ -2583,6 +2582,95 @@ public static class WeaponAnimatorSelfTests
 			animation,
 			DmxWriter.WriteAnimation( document, skeleton, clip ),
 			"DMX animation output must be deterministic." );
+
+		var scaledSkeleton = new HostSkeleton();
+		scaledSkeleton.Add( new HostBone
+		{
+			Name = "root",
+			BindModelTransform = Transform.Zero,
+			BindLocalTransform = Transform.Zero,
+			HasExplicitBindLocal = true
+		} );
+		scaledSkeleton.Add( new HostBone
+		{
+			Name = "weapon_root",
+			ParentName = "root",
+			BindModelTransform = new Transform(
+				Vector3.Zero,
+				Rotation.Identity,
+				Vector3.One * 0.56f ),
+			BindLocalTransform = new Transform(
+				Vector3.Zero,
+				Rotation.Identity,
+				Vector3.One * 0.56f ),
+			HasExplicitBindLocal = true,
+			IsWeaponBone = true
+		} );
+		scaledSkeleton.Add( new HostBone
+		{
+			Name = "hammer",
+			ParentName = "weapon_root",
+			BindModelTransform = new Transform(
+				new Vector3( 0, -5.75f, 0.2f ) * 0.56f ),
+			BindLocalTransform = new Transform( new Vector3( 0, -5.75f, 0.2f ) ),
+			HasExplicitBindLocal = true,
+			IsWeaponBone = true
+		} );
+		var hammerTrack = clip.EnsureTrack( "hammer" );
+		var hammerRotation = Rotation.FromPitch( 45 );
+		WeaponAnimationMath.UpsertKey(
+			hammerTrack,
+			0,
+			new Transform( new Vector3( 0, -5.75f, 0.2f ), hammerRotation ) );
+		var scaledPose = AnimationPoseEvaluator.Evaluate(
+			document,
+			scaledSkeleton,
+			clip,
+			0 );
+		var exportedPose = DmxWriter.BuildCompilerPoseLocals(
+			scaledSkeleton,
+			scaledPose.Local );
+		var exportedRoot = exportedPose["weapon_root"];
+		var exportedHammer = exportedPose["hammer"];
+		Near(
+			report,
+			Vector3.One,
+			exportedRoot.Scale,
+			0.0001f,
+			"Animation export must use ModelDoc's scale-one compiled bind space." );
+		Near(
+			report,
+			new Vector3( 0, -5.75f, 0.2f ) * 0.56f,
+			exportedHammer.Position,
+			0.0001f,
+			"Rotating a weapon child must use the physical scale-baked mesh pivot in compiled bind space." );
+		Near(
+			report,
+			hammerRotation.Forward,
+			exportedHammer.Rotation.Forward,
+			0.0001f,
+			"Rotating a weapon child must retain its authored local rotation in compiled bind space." );
+		var scaledAnimation = DmxWriter.WriteAnimation(
+			document,
+			scaledSkeleton,
+			clip );
+		var scaledReference = DmxWriter.WriteReference( scaledSkeleton );
+		Check(
+			report,
+			!scaledAnimation.Contains(
+				"\"scale\" \"float\" \"0.56\"",
+				StringComparison.Ordinal ),
+			"Animation bind declarations must not reintroduce source scale after ModelDoc bakes it into the host." );
+		Check(
+			report,
+			scaledReference.Contains(
+				"\"position\" \"vector3\" \"0 -3.22 0.112\"",
+				StringComparison.Ordinal )
+				&& scaledAnimation.Contains(
+					"\"position\" \"vector3\" \"0 -3.22 0.112\"",
+					StringComparison.Ordinal ),
+			"Reference and animation skeletons must share the scale-baked physical pivot of rotating weapon children." );
+
 		document.Manifest.Files.Add( new GeneratedFileRecord
 		{
 			RelativePath = "generated_sequence.dmx"
@@ -2807,8 +2895,9 @@ public static class WeaponAnimatorSelfTests
 		Check(
 			report,
 			before.Contains( "\"DmeFloatLogLayer\"", StringComparison.Ordinal )
-				&& before.Contains( "\"0.0001\"", StringComparison.Ordinal ),
-			"Bone visibility must be baked into standard sequence scale channels." );
+				&& before.Contains( "\"0.0001\"", StringComparison.Ordinal )
+				&& before.Contains( "-8192", StringComparison.Ordinal ),
+			"Bone visibility must use native sequence scale and off-screen position channels." );
 		Check(
 			report,
 			graph.Contains( WeaponVisibilityEvaluator.VisibleTag( part.Id ) )

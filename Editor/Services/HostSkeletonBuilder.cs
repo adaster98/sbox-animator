@@ -83,40 +83,24 @@ public sealed class HostSkeleton
 
 	public IReadOnlyDictionary<string, Transform> BuildCompilerBindModelTransforms()
 	{
-		var result = new Dictionary<string, Transform>( StringComparer.OrdinalIgnoreCase );
-		var pending = Bones.ToList();
-		while ( pending.Count > 0 )
-		{
-			var progressed = false;
-			for ( var i = pending.Count - 1; i >= 0; i-- )
-			{
-				var bone = pending[i];
-				if ( !string.IsNullOrWhiteSpace( bone.ParentName )
-					&& ByName.ContainsKey( bone.ParentName )
-					&& !result.ContainsKey( bone.ParentName ) )
-				{
-					continue;
-				}
+		// Render-mesh import scale is already baked into physical bone positions. Preserve those
+		// pivots while exposing the scale-one skeleton expected by ModelDoc and runtime skinning.
+		return Bones.ToDictionary(
+			bone => bone.Name,
+			bone => bone.BindModelTransform.WithScale( Vector3.One ),
+			StringComparer.OrdinalIgnoreCase );
+	}
 
-				// ModelDoc bakes source scale into mesh data, then exposes a scale-one bind
-				// skeleton without propagating the authored parent scale into child offsets.
-				var local = GetBindLocal( bone ).WithScale( Vector3.One );
-				result[bone.Name] = string.IsNullOrWhiteSpace( bone.ParentName )
-					|| !result.TryGetValue( bone.ParentName, out var parent )
-						? local
-						: ComposeLocal( parent, local );
-				pending.RemoveAt( i );
-				progressed = true;
-			}
-
-			if ( progressed )
-				continue;
-
-			throw new InvalidOperationException(
-				$"The animation host contains a cyclic bone hierarchy near '{pending[0].Name}'." );
-		}
-
-		return result;
+	public IReadOnlyDictionary<string, Transform> BuildCompilerBindLocalTransforms()
+	{
+		var model = BuildCompilerBindModelTransforms();
+		return Bones.ToDictionary(
+			bone => bone.Name,
+			bone => string.IsNullOrWhiteSpace( bone.ParentName )
+				|| !model.TryGetValue( bone.ParentName, out var parent )
+					? model[bone.Name]
+					: parent.ToLocal( model[bone.Name] ),
+			StringComparer.OrdinalIgnoreCase );
 	}
 
 	private static Transform ComposeLocal( Transform parent, Transform local ) => new(

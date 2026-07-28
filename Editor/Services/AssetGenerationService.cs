@@ -23,7 +23,7 @@ public sealed class GenerationResult
 
 public sealed class AssetGenerationService
 {
-	public const string GeneratorVersion = "1.7.0";
+	public const string GeneratorVersion = "1.9.0";
 	private const string ManifestFile = "weaponanim.manifest.json";
 
 	public async Task<GenerationResult> GenerateAsync( WeaponAnimationDocument document )
@@ -547,7 +547,7 @@ public sealed class AssetGenerationService
 			graphPath,
 			skeleton.Bones.Select( bone => bone.Name ),
 			weaponMesh,
-			BuildHostAttachments( document ) );
+			BuildHostAttachments( document, skeleton ) );
 		files[hostName] = hostSource;
 
 		if ( document.Output.GenerateGraph && document.Graph.GenerateGraph )
@@ -560,7 +560,7 @@ public sealed class AssetGenerationService
 				"",
 				skeleton.Bones.Select( bone => bone.Name ),
 				weaponMesh,
-				BuildHostAttachments( document ) );
+				BuildHostAttachments( document, skeleton ) );
 			files[graphName] = AnimGraphWriter.Write(
 				document,
 				$"{relativeRoot}/{bootstrapHostName}" );
@@ -588,9 +588,14 @@ public sealed class AssetGenerationService
 	}
 
 	private static IEnumerable<HostAttachment> BuildHostAttachments(
-		WeaponAnimationDocument document )
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton )
 	{
 		var sourceRoot = document.Rig.FindBone( document.Rig.SourceSkeletonRootId );
+		var compilerModel = skeleton.BuildCompilerBindModelTransforms();
+		var placement = WeaponAnimationMath.Compose(
+			document.Calibration.PhysicalTransform,
+			document.Calibration.FramingTransform );
 		foreach ( var anchor in document.Calibration.Anchors.Where( x =>
 			x.Kind is AnchorKind.Muzzle or AnchorKind.Eject or AnchorKind.Custom ) )
 		{
@@ -603,6 +608,11 @@ public sealed class AssetGenerationService
 				StringComparison.OrdinalIgnoreCase )
 					? "weapon_root"
 					: parent.Name;
+			if ( !compilerModel.TryGetValue( parentName, out var compiledParent ) )
+				continue;
+
+			var anchorModelPosition = placement.PointToWorld( anchor.LocalPosition );
+			var anchorModelRotation = placement.Rotation * anchor.LocalRotation;
 			yield return new HostAttachment(
 				anchor.Kind switch
 				{
@@ -611,8 +621,8 @@ public sealed class AssetGenerationService
 					_ => WeaponAnimationDocument.Slugify( anchor.Name )
 				},
 				parentName,
-				parent.BindModelTransform.PointToLocal( anchor.LocalPosition ),
-				parent.BindModelTransform.Rotation.Inverse * anchor.LocalRotation );
+				compiledParent.PointToLocal( anchorModelPosition ),
+				compiledParent.Rotation.Inverse * anchorModelRotation );
 		}
 	}
 
@@ -901,6 +911,8 @@ public sealed class AssetGenerationService
 			return;
 		}
 
+		LogRotatingWeaponPivotDiagnostics( document, skeleton, host, diagnostics, hostPath );
+
 		var sequenceNames = Enumerable.Range( 0, host.AnimationCount )
 			.Select( host.GetAnimationName )
 			.Where( name => !string.IsNullOrWhiteSpace( name ) )
@@ -1116,6 +1128,62 @@ public sealed class AssetGenerationService
 				&& (expected.BindModelTransform.Scale - actual.LocalTransform.Scale).Length
 					> scaleTolerance;
 		} );
+
+	private static void LogRotatingWeaponPivotDiagnostics(
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton,
+		Model host,
+		List<GenerationDiagnostic> diagnostics,
+		string hostPath )
+	{
+		var compilerLocal = skeleton.BuildCompilerBindLocalTransforms();
+		var targets = document.Clips
+			.SelectMany( clip => clip.Tracks )
+			.Where( track => skeleton.ByName.TryGetValue( track.Target, out var bone )
+				&& bone.IsWeaponBone
+				&& track.Keys.Any( key => RotationDiffers(
+					key.Rotation,
+					skeleton.GetBindLocal( bone ).Rotation ) ) )
+			.Select( track => track.Target )
+			.Distinct( StringComparer.OrdinalIgnoreCase )
+			.OrderBy( name => name, StringComparer.OrdinalIgnoreCase )
+			.ToArray();
+
+		foreach ( var target in targets )
+		{
+			var expected = skeleton.ByName[target];
+			var actual = host.Bones.GetBone( target );
+			var actualParent = actual?.Parent;
+			var actualLocal = actual is null
+				? Transform.Zero
+				: actualParent is null
+					? actual.LocalTransform
+					: actualParent.LocalTransform.ToLocal( actual.LocalTransform );
+			Log.Info(
+				$"[Weapon Animator] rotating weapon pivot '{target}': "
+				+ $"parent expected='{expected.ParentName}', actual='{actualParent?.Name ?? ""}', "
+				+ $"authoredLocal={DescribeTransform( skeleton.GetBindLocal( expected ) )}, "
+				+ $"exportLocal={DescribeTransform( compilerLocal[target] )}, "
+				+ $"compiledLocal={DescribeTransform( actualLocal )}, "
+				+ $"compiledModel={DescribeTransform( actual?.LocalTransform ?? Transform.Zero )}." );
+		}
+
+		if ( targets.Length > 0 )
+		{
+			diagnostics.Add( Diagnostic(
+				ValidationSeverity.Info,
+				"inspect.rotation_pivots",
+				$"Verified {targets.Length} rotation-driven weapon bone pivot(s) in compiled bind space.",
+				hostPath ) );
+		}
+	}
+
+	private static bool RotationDiffers(
+		Rotation left,
+		Rotation right,
+		float tolerance = 0.001f ) =>
+		(left.Forward - right.Forward).Length > tolerance
+			|| (left.Up - right.Up).Length > tolerance;
 
 	private static string DescribeTransform( Transform transform ) =>
 		$"pos({transform.Position.x:0.####},{transform.Position.y:0.####},{transform.Position.z:0.####}) "
