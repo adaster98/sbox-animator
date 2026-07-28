@@ -252,7 +252,10 @@ public sealed class RigAuditPanel : Widget
 		var source = _controller.Document.Source;
 		_sourceStatus.Text = string.IsNullOrWhiteSpace( source.SourcePath )
 			? "No source selected"
-			: $"{source.SourcePath}\n{_controller.Document.Rig.Bones.Count} bones · {(source.Compiled ? "compiled" : "compile failed")}";
+			: $"{source.SourcePath}\n{_controller.Document.Rig.Bones.Count} bones · "
+				+ $"{source.Materials.Count( material => material.HasUsableTextures )}/"
+				+ $"{source.Materials.Count} textured materials · "
+				+ $"{(source.Compiled ? "compiled" : "compile failed")}";
 		var rig = _controller.Document.Rig;
 		var retained = rig.Bones.Count( WeaponRigHierarchy.IsRetained );
 		var structural = rig.Bones.Count( x =>

@@ -56,6 +56,7 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "history and key clipboard", TestControllerHistoryAndClipboard );
 		Run( report, "calibration and generation validation", TestValidation );
 		Run( report, "generation output paths", TestGenerationOutputPaths );
+		Run( report, "material discovery and output", TestMaterialPipeline );
 		Run( report, "generated file removal", TestGeneratedFileRemoval );
 		Run( report, "calibration rebase", TestRebase );
 		Run( report, "DMX output", TestDmxOutput );
@@ -2365,6 +2366,32 @@ public static class WeaponAnimatorSelfTests
 			rejectedDrive,
 			"Generation output must reject absolute drive paths on every host platform." );
 
+		var nestedOutputRoot = Path.Combine(
+			Path.GetTempPath(),
+			$"weaponanim-nested-output-{Guid.NewGuid():N}" );
+		try
+		{
+			AssetGenerationService.WriteTextSourcesForTests(
+				nestedOutputRoot,
+				new Dictionary<string, string>
+				{
+					["materials/output_test_body.vmat"] = "fixture material",
+					["output_test_vm.vmdl"] = "fixture model"
+				} );
+			Check(
+				report,
+				File.Exists( Path.Combine(
+					nestedOutputRoot,
+					"materials",
+					"output_test_body.vmat" ) ),
+				"Generation must create parent directories for nested material sources." );
+		}
+		finally
+		{
+			if ( Directory.Exists( nestedOutputRoot ) )
+				Directory.Delete( nestedOutputRoot, true );
+		}
+
 		document.Output = null!;
 		Equal(
 			report,
@@ -2477,6 +2504,210 @@ public static class WeaponAnimatorSelfTests
 		{
 			Directory.Delete( root, true );
 		}
+	}
+
+	private static void TestMaterialPipeline( WeaponAnimatorSelfTestReport report )
+	{
+		var embeddedMaterials = WeaponMaterialPipeline.MatchEmbeddedMaterialNamesForTests(
+			["HK_P30L", "cartridge"],
+			["Material", "H&K_P30L", "cartridge", "cartridge_BaseColor"] );
+		Check(
+			report,
+			embeddedMaterials.Contains( "H&K_P30L" )
+				&& embeddedMaterials.Contains( "cartridge" )
+				&& embeddedMaterials.Count == 2,
+			"Embedded FBX labels must preserve special characters when matching texture-set names." );
+
+		var discovered = WeaponMaterialPipeline.DiscoverForTests(
+			[
+				"H&K_P30L.vmat",
+				"cartridge.vmat",
+				"materials/error.vmat"
+			],
+			[
+				"/fixture/Textures/HK_P30L_BaseColor.png",
+				"/fixture/Textures/HK_P30L_Normal_GL.png",
+				"/fixture/Textures/HK_P30L_Normal_DX.png",
+				"/fixture/Textures/HK_P30L_Roughness.png",
+				"/fixture/Textures/HK_P30L_Metallic.png",
+				"/fixture/Textures/cartridge_BaseColor.png",
+				"/fixture/Textures/cartridge_Normal_DX.png"
+			] );
+		Equal(
+			report,
+			2,
+			discovered.Count,
+			"Nearby texture discovery must retain every FBX material slot." );
+		var pistol = discovered.Single( material => material.Name == "H&K_P30L" );
+		Check(
+			report,
+			pistol.FindTexture( WeaponTextureChannel.Normal )?.AssetPath
+				.EndsWith( "Normal_GL.png", StringComparison.OrdinalIgnoreCase ) == true,
+			"S&box-compatible OpenGL normal maps must win when both GL and DX variants are available." );
+		Check(
+			report,
+			pistol.FindTexture( WeaponTextureChannel.Metalness ) is not null
+				&& discovered.Single( material => material.Name == "cartridge" )
+					.FindTexture( WeaponTextureChannel.BaseColor ) is not null,
+			"Texture sets must be matched independently to their source material names." );
+		Check(
+			report,
+			discovered.All( material => !material.SourceMaterialPath.Equals(
+				"materials/error",
+				StringComparison.OrdinalIgnoreCase ) ),
+			"The compiler error material must never become a generated weapon material slot." );
+		Check(
+			report,
+			discovered.All( material => !Path.HasExtension( material.SourceMaterialPath ) ),
+			"Stored source material labels must not look like GameResource dependencies." );
+		Equal(
+			report,
+			"weaponanim_preview_cache/0123456789abcdef",
+			WeaponMaterialPipeline.LegalPreviewRelativeRootForTests(
+				"/fixture/Assets/.weaponanim-cache/0123456789abcdef" ),
+			"Preview materials must use a legal non-hidden asset namespace." );
+		var originalRevision = WeaponMaterialPipeline.PreviewRevision( discovered );
+		pistol.Textures[0].Sha256 = "changed-image-hash";
+		var changedRevision = WeaponMaterialPipeline.PreviewRevision( discovered );
+		Check(
+			report,
+			!originalRevision.Equals( changedRevision, StringComparison.Ordinal ),
+			"A changed texture input must create a new immutable preview revision." );
+		pistol.Textures[0].Sha256 = "";
+
+		var document = ValidDocument();
+		document.Source.Materials = discovered.ToList();
+		var generated = WeaponMaterialPipeline.BuildOutputTextFiles(
+			document,
+			"weapons/test_weapon/viewmodel" );
+		var material = generated["materials/test_weapon_h_k_p30l.vmat"];
+		Check(
+			report,
+			material.Contains( "F_SPECULAR 1", StringComparison.Ordinal )
+				&& material.Contains( "F_METALNESS_TEXTURE 1", StringComparison.Ordinal )
+				&& material.Contains( "TextureMetalness", StringComparison.Ordinal )
+				&& material.Contains(
+					"test_weapon_h_k_p30l_metalness.png",
+					StringComparison.Ordinal ),
+			"Generated weapon VMATs must enable specular and mapped metalness." );
+		Check(
+			report,
+			generated.Keys.Count( path => path.EndsWith(
+				".vtex",
+				StringComparison.OrdinalIgnoreCase ) ) == 0
+				&& material.Contains(
+					"test_weapon_h_k_p30l_color.png",
+					StringComparison.Ordinal )
+				&& material.Contains(
+					"test_weapon_h_k_p30l_normal.png",
+					StringComparison.Ordinal ),
+			"VMATs must reference image inputs directly so S&box can build native generated VTEX resources." );
+		document.Source.NeedsModelDocWrapper = true;
+		pistol.PreviewMaterialPath =
+			".weaponanim-cache/fixture/materials/h_k_p30l.vmat";
+		Check(
+			report,
+			WeaponMaterialPipeline.RequiresPreviewRefresh( document ),
+			"Legacy hidden preview material paths must force a safe material refresh." );
+		foreach ( var binding in discovered.Where( binding => binding.HasUsableTextures ) )
+		{
+			binding.PreviewMaterialPath =
+				$"weaponanim_preview_cache/fixture/revision/materials/{binding.OutputName}.vmat";
+		}
+		Check(
+			report,
+			!WeaponMaterialPipeline.RequiresPreviewRefresh( document ),
+			"Legal compiled preview material paths must not refresh repeatedly." );
+		var serializedDocument = Json.Serialize( document );
+		Check(
+			report,
+			!serializedDocument.Contains(
+				"PreviewMaterialPath",
+				StringComparison.Ordinal )
+				&& !serializedDocument.Contains(
+					"H&K_P30L.vmat",
+					StringComparison.OrdinalIgnoreCase ),
+			"Transient preview VMATs and source slot extensions must stay out of .wepanim serialization." );
+
+		var legacyMaterialDocument = WeaponAnimationDocument.CreateDefault();
+		legacyMaterialDocument.Source.Materials =
+		[
+			new SourceMaterialBinding
+			{
+				SourceMaterialPath = "cartridge.vmat",
+				Name = "cartridge",
+				OutputName = "cartridge"
+			}
+		];
+		var materialMigration = WeaponAnimationMigration.MigrateAndRepair(
+			legacyMaterialDocument );
+		Check(
+			report,
+			materialMigration.RepairedMaterialMetadata
+				&& legacyMaterialDocument.Source.Materials[0].SourceMaterialPath
+					.Equals( "cartridge", StringComparison.Ordinal ),
+			"Opening an existing project must remove false VMAT dependencies from source slot metadata." );
+
+		var recoveredCandidate = WeaponSourceImporter.SelectRecoveryCandidateForTests(
+		[
+			new(
+				"/preview/newer-uncompiled/models/source_abc_textured.vmdl",
+				new DateTime( 2026, 7, 28, 20, 0, 0, DateTimeKind.Utc ),
+				false,
+				true ),
+			new(
+				"/preview/legacy/models/source_abc_textured.vmdl",
+				new DateTime( 2026, 7, 28, 19, 0, 0, DateTimeKind.Utc ),
+				true,
+				false ),
+			new(
+				"/preview/versioned/models/source_abc_textured.vmdl",
+				new DateTime( 2026, 7, 28, 18, 0, 0, DateTimeKind.Utc ),
+				true,
+				true )
+		] );
+		Equal(
+			report,
+			"/preview/versioned/models/source_abc_textured.vmdl",
+			recoveredCandidate,
+			"Missing saved source wrappers must recover to a compiled immutable preview revision." );
+		Check(
+			report,
+			!WeaponAnimatorViewport.ShouldRetryMissingSourcePreview(
+				"weaponanim_preview_cache/document/source.vmdl",
+				"weaponanim_preview_cache/document/source.vmdl" )
+				&& WeaponAnimatorViewport.ShouldRetryMissingSourcePreview(
+					"weaponanim_preview_cache/document/repaired.vmdl",
+					"weaponanim_preview_cache/document/source.vmdl" ),
+			"A failed source load must not rebuild the private scene every frame, "
+				+ "but a repaired path must trigger one rebuild." );
+
+		var remaps = WeaponMaterialPipeline.OutputRemaps(
+			document,
+			"weapons/test_weapon/viewmodel" );
+		Equal(
+			report,
+			2,
+			remaps.Count,
+			"Final generation must preserve separate material-slot remaps." );
+		var host = ModelDocWriter.WriteHost(
+			"host_reference.dmx",
+			[],
+			"",
+			["weapon_root"],
+			new HostWeaponMesh(
+				"source.fbx",
+				"weapon_root",
+				Transform.Zero,
+				[],
+				remaps ) );
+		Check(
+			report,
+			host.Contains( "use_global_default = false", StringComparison.Ordinal )
+				&& !host.Contains( "use_global_default = true", StringComparison.Ordinal )
+				&& host.Contains( "from = \"H&K_P30L.vmat\"", StringComparison.Ordinal )
+				&& host.Contains( "from = \"cartridge.vmat\"", StringComparison.Ordinal ),
+			"Weapon ModelDocs must use per-slot remaps with global material override disabled." );
 	}
 
 	private static void TestRebase( WeaponAnimatorSelfTestReport report )
@@ -2694,7 +2925,12 @@ public static class WeaponAnimatorSelfTests
 				"weapon.fbx",
 				"root",
 				new Transform( Vector3.Zero, Rotation.Identity, Vector3.One * 0.6f ),
-				[] ),
+				[],
+				[
+					new HostMaterialRemap(
+						"frame.vmat",
+						"weapons/test/materials/frame.vmat" )
+				] ),
 			[
 				new HostAttachment(
 					"muzzle",
@@ -2709,7 +2945,9 @@ public static class WeaponAnimatorSelfTests
 				&& host.Contains( "filename = \"weapon.fbx\"", StringComparison.Ordinal )
 				&& host.Contains( "import_scale = 0.6", StringComparison.Ordinal )
 				&& host.Contains( "anim_graph_name = \"weapon.vanmgrph\"", StringComparison.Ordinal )
-				&& host.Contains( "use_global_default = true", StringComparison.Ordinal )
+				&& host.Contains( "use_global_default = false", StringComparison.Ordinal )
+				&& !host.Contains( "use_global_default = true", StringComparison.Ordinal )
+				&& host.Contains( "from = \"frame.vmat\"", StringComparison.Ordinal )
 				&& host.Contains( "from = \"materials/tools/toolsinvisible.vmat\"", StringComparison.Ordinal )
 				&& host.Contains( "_class = \"Attachment\"", StringComparison.Ordinal )
 				&& host.Contains( "name = \"muzzle\"", StringComparison.Ordinal ),

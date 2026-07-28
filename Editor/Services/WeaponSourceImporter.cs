@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading.Tasks;
 using Editor;
 using Sandbox;
 
@@ -17,12 +18,19 @@ public sealed class SourceImportResult
 	public string ModelPath { get; init; } = "";
 	public Model? Model { get; init; }
 	public List<RigAuditIssue> Issues { get; init; } = [];
+	public List<SourceMaterialBinding> Materials { get; init; } = [];
 }
 
 public sealed class WeaponSourceImporter
 {
 	private static readonly HashSet<string> SupportedExtensions =
 		new( StringComparer.OrdinalIgnoreCase ) { ".fbx", ".smd", ".dmx", ".vmdl" };
+
+	internal readonly record struct PreviewModelRecoveryCandidate(
+		string AbsolutePath,
+		DateTime LastWriteUtc,
+		bool HasCompiledArtifact,
+		bool HasVersionMarker );
 
 	public SourceImportResult Import( WeaponAnimationDocument document, string selectedPath )
 	{
@@ -86,24 +94,45 @@ public sealed class WeaponSourceImporter
 			importStage = "auditing the skeleton";
 			var bones = AuditBones( model, out var rootName, out var issues );
 			var sourceRootBoneName = rootName;
-			if ( needsWrapper
-				&& !string.IsNullOrWhiteSpace( rootName )
-				&& !rootName.Equals( "weapon_root", StringComparison.OrdinalIgnoreCase )
-				&& bones.All( bone => !bone.Name.Equals( "weapon_root", StringComparison.OrdinalIgnoreCase ) ) )
+			var materials = new List<SourceMaterialBinding>();
+			if ( needsWrapper )
 			{
-				importStage = "normalizing the weapon root";
+				importStage = "discovering nearby weapon textures";
+				materials = WeaponMaterialPipeline.DiscoverAndPreparePreview(
+					absoluteSource,
+					cacheRoot,
+					modelAsset,
+					model,
+					issues );
+
+				importStage = "applying source material slots";
 				var wrapperPath = Path.Combine( cacheRoot, $"source_{sourceHash[..12]}.vmdl" );
+				var canNormalizeRoot =
+					!string.IsNullOrWhiteSpace( rootName )
+					&& !rootName.Equals( "weapon_root", StringComparison.OrdinalIgnoreCase )
+					&& bones.All( bone => !bone.Name.Equals(
+						"weapon_root",
+						StringComparison.OrdinalIgnoreCase ) );
 				AtomicFile.WriteAllText(
 					wrapperPath,
-					ModelDocWriter.WriteSourceWrapper( RelativeAssetPath( cachedSource ), rootName ) );
+					ModelDocWriter.WriteSourceWrapper(
+						RelativeAssetPath( cachedSource ),
+						canNormalizeRoot ? rootName : "",
+						materialRemaps: WeaponMaterialPipeline.PreviewRemaps( materials ) ) );
 				modelAsset = AssetSystem.RegisterFile( wrapperPath ) ?? modelAsset;
 				if ( !modelAsset.Compile( true ) )
-					return Fail( $"Could not rename source root '{rootName}' to 'weapon_root'." );
+					return Fail( "Could not compile the textured source wrapper." );
 
 				model = Model.Load( modelAsset.Path );
 				if ( model is null || model.IsError )
-					return Fail( "The root-normalized source wrapper did not reload." );
+					return Fail( "The textured source wrapper did not reload." );
+				var materialIssues = issues
+					.Where( issue => issue.Code.StartsWith(
+						"material.",
+						StringComparison.OrdinalIgnoreCase ) )
+					.ToArray();
 				bones = AuditBones( model, out rootName, out issues );
+				issues.AddRange( materialIssues );
 			}
 
 			if ( bones.FirstOrDefault( x =>
@@ -121,6 +150,7 @@ public sealed class WeaponSourceImporter
 			document.Source.Compiled = model.BoneCount > 0 && !model.IsError;
 			document.Source.PreviewHostCompiled = false;
 			document.Source.LastImportedUtc = DateTime.UtcNow;
+			document.Source.Materials = materials;
 			document.Rig.RootBone = rootName;
 			document.Rig.Bones = bones;
 			document.Rig.AuditIssues = issues;
@@ -134,11 +164,12 @@ public sealed class WeaponSourceImporter
 			{
 				Success = document.Source.Compiled,
 				Message = document.Source.Compiled
-					? $"Imported {model.BoneCount} bones from {Path.GetFileName( selectedPath )}."
+					? ImportMessage( model, selectedPath, materials )
 					: "The model has no usable skeleton.",
 				ModelPath = modelAsset.Path,
 				Model = model,
-				Issues = issues
+				Issues = issues,
+				Materials = materials
 			};
 		}
 		catch ( Exception ex )
@@ -148,6 +179,460 @@ public sealed class WeaponSourceImporter
 				+ $"Selected='{selectedPath}', resolved='{absoluteSource}', cache='{cacheRoot}'. {ex}" );
 			return Fail( $"Import failed while {importStage}: {ex.Message}" );
 		}
+	}
+
+	public async Task<SourceImportResult> RefreshMaterialsAsync(
+		WeaponAnimationDocument document )
+	{
+		if ( !document.Source.NeedsModelDocWrapper )
+			return Fail( "Automatic texture discovery currently applies to imported FBX, SMD, and DMX sources." );
+
+		var selectedPath = new[]
+			{
+				document.Source.OriginalSourcePath,
+				document.Source.SourcePath
+			}
+			.Where( path => !string.IsNullOrWhiteSpace( path ) )
+			.FirstOrDefault( path =>
+			{
+				try
+				{
+					return File.Exists( ResolveAbsolutePath( path ) );
+				}
+				catch
+				{
+					return false;
+				}
+			} )
+			?? document.Source.OriginalSourcePath;
+		var absoluteSource = ResolveAbsolutePath( selectedPath );
+		if ( string.IsNullOrWhiteSpace( absoluteSource ) || !File.Exists( absoluteSource ) )
+			return Fail( $"Source file does not exist: {selectedPath}" );
+
+		try
+		{
+			var cacheRoot = GetPreviewCacheRoot( document.DocumentId );
+			Directory.CreateDirectory( cacheRoot );
+			var sourceHash = string.IsNullOrWhiteSpace( document.Source.SourceHash )
+				? HashFile( absoluteSource )
+				: document.Source.SourceHash;
+			var cachedSource = EnsureSourceInsideAssets(
+				absoluteSource,
+				cacheRoot,
+				sourceHash );
+			var legacyWrapperPath = Path.Combine(
+				cacheRoot,
+				$"source_{sourceHash[..12]}.vmdl" );
+			var modelAsset = AssetSystem.FindByPath( document.Source.CompiledModelPath )
+				?? AssetSystem.FindByPath( legacyWrapperPath )
+				?? AssetSystem.RegisterFile( legacyWrapperPath );
+			if ( modelAsset is null )
+				return Fail( "The source wrapper is not registered with the Asset System." );
+
+			Model? sourceModel = null;
+			try
+			{
+				sourceModel = modelAsset.LoadResource<Model>() ?? Model.Load( modelAsset.Path );
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning(
+					$"[Weapon Animator] current source wrapper could not be inspected; "
+					+ $"saved and embedded slot names will be used instead: {ex.Message}" );
+			}
+
+			var issues = new List<RigAuditIssue>();
+			var materials = WeaponMaterialPipeline.DiscoverAndPreparePreview(
+				absoluteSource,
+				cacheRoot,
+				modelAsset,
+				sourceModel,
+				issues,
+				document.Source.Materials.Select( material => material.SourceMaterialPath ) );
+			if ( materials.Count == 0 )
+				return Fail( "No source material slots or nearby texture sets were found." );
+
+			Log.Info(
+				$"[Weapon Animator] material refresh matched "
+				+ $"{materials.Count( material => material.HasUsableTextures )} of "
+				+ $"{materials.Count} slot(s) in preview revision "
+				+ $"'{WeaponMaterialPipeline.PreviewRevision( materials )}'." );
+			foreach ( var textureAbsolute in
+				WeaponMaterialPipeline.PreviewTextureAbsolutePaths( materials ) )
+			{
+				var textureAsset = AssetSystem.RegisterFile( textureAbsolute );
+				if ( textureAsset is null
+					|| textureAsset.IsDeleted
+					|| !textureAsset.HasSourceFile )
+					return Fail(
+						$"The preview texture could not be registered: "
+						+ $"{RelativeAssetPath( textureAbsolute )}" );
+			}
+			// Give the directory watcher one frame to retain the newly registered image
+			// sources before asking MaterialCompiler to consume them.
+			await Task.Delay( 16 );
+
+			foreach ( var materialAbsolute in
+				WeaponMaterialPipeline.PreviewMaterialAbsolutePaths( materials ) )
+			{
+				var materialAsset = AssetSystem.RegisterFile( materialAbsolute );
+				if ( materialAsset is null )
+					return Fail(
+						$"The preview material could not be registered: "
+						+ $"{RelativeAssetPath( materialAbsolute )}" );
+				if ( !await AssetGenerationService.WaitForCompileAsync(
+					materialAsset,
+					materialAbsolute ) )
+				{
+					Log.Error(
+						$"[Weapon Animator] preview material compilation failed: "
+						+ $"'{materialAsset.Path}'." );
+					return Fail(
+						$"Preview material compilation failed: {materialAsset.Path}" );
+				}
+			}
+
+			var revisionRoot = WeaponMaterialPipeline.PreviewRevisionRoot(
+				cacheRoot,
+				materials );
+			var modelRoot = Path.Combine( revisionRoot, "models" );
+			Directory.CreateDirectory( modelRoot );
+			var wrapperPath = MaterialCandidateWrapperPath(
+				cacheRoot,
+				sourceHash,
+				materials );
+			AtomicFile.WriteAllText(
+				wrapperPath,
+				ModelDocWriter.WriteSourceWrapper(
+					RelativeAssetPath( cachedSource ),
+					document.Rig.Bones.All( bone =>
+						!bone.Name.Equals(
+							"weapon_root",
+							StringComparison.OrdinalIgnoreCase )
+						|| bone.Name.Equals(
+							document.Source.SourceRootBoneName,
+							StringComparison.OrdinalIgnoreCase ) )
+								? document.Source.SourceRootBoneName
+								: "",
+					materialRemaps: WeaponMaterialPipeline.PreviewRemaps( materials ) ) );
+			var candidateAsset = AssetSystem.RegisterFile( wrapperPath );
+			if ( candidateAsset is null )
+				return Fail( "The candidate textured source wrapper could not be registered." );
+			if ( !await AssetGenerationService.WaitForCompileAsync(
+				candidateAsset,
+				wrapperPath ) )
+				return Fail( "The candidate textured source wrapper could not be compiled." );
+
+			var model = await ReloadMaterialPreviewAsync(
+				wrapperPath,
+				candidateAsset.Path );
+			if ( model is null || model.IsError || model.BoneCount == 0 )
+				return Fail(
+					"The candidate textured source wrapper compiled but did not reload "
+					+ "with a usable skeleton." );
+
+			Log.Info(
+				$"[Weapon Animator] accepted material preview '{candidateAsset.Path}' "
+				+ $"with {model.BoneCount} bones. The active document can now switch safely." );
+			return new SourceImportResult
+			{
+				Success = true,
+				Message = ImportMessage( model, selectedPath, materials ),
+				ModelPath = candidateAsset.Path,
+				Model = model,
+				Issues = issues,
+				Materials = materials
+			};
+		}
+		catch ( Exception ex )
+		{
+			Log.Error( $"[Weapon Animator] material refresh failed for '{selectedPath}': {ex}" );
+			return Fail( $"Material refresh failed: {ex.Message}" );
+		}
+	}
+
+	public static void ApplyMaterialRefresh(
+		WeaponAnimationDocument document,
+		SourceImportResult result )
+	{
+		if ( !result.Success )
+			return;
+
+		document.Source.Materials = result.Materials;
+		document.Source.CompiledModelPath = result.ModelPath;
+		document.Source.Compiled = result.Model is { IsError: false } && result.Model.BoneCount > 0;
+		document.Source.LastImportedUtc = DateTime.UtcNow;
+		document.Rig.AuditIssues.RemoveAll( issue => issue.Code.StartsWith(
+			"material.",
+			StringComparison.OrdinalIgnoreCase ) );
+		document.Rig.AuditIssues.AddRange( result.Issues );
+	}
+
+	public static bool TryRecoverMissingPreviewModel(
+		WeaponAnimationDocument document,
+		out string message )
+	{
+		message = "";
+		if ( document.Source is null
+			|| !document.Source.NeedsModelDocWrapper
+			|| SourceAssetExists( document.Source.CompiledModelPath ) )
+			return false;
+
+		var previewRoot = Path.Combine(
+			GetContentRoot(),
+			"weaponanim_preview_cache",
+			document.DocumentId.ToString( "N" ) );
+		if ( !Directory.Exists( previewRoot ) )
+			return false;
+
+		var sourceHash = document.Source.SourceHash;
+		var expectedPrefix = sourceHash.Length >= 12
+			? $"source_{sourceHash[..12]}_textured"
+			: "source_";
+		var candidates = Directory.EnumerateFiles(
+				previewRoot,
+				"source_*_textured.vmdl",
+				SearchOption.AllDirectories )
+			.Where( path =>
+			{
+				var filename = Path.GetFileNameWithoutExtension( path );
+				return sourceHash.Length < 12
+					? filename.StartsWith( expectedPrefix, StringComparison.OrdinalIgnoreCase )
+					: filename.Equals( expectedPrefix, StringComparison.OrdinalIgnoreCase );
+			} )
+			.Select( path => new PreviewModelRecoveryCandidate(
+				path,
+				File.GetLastWriteTimeUtc( path ),
+				File.Exists( path + "_c" ),
+				File.Exists( Path.Combine(
+					Path.GetDirectoryName( Path.GetDirectoryName( path ) ) ?? "",
+					".weaponanim-preview-version" ) ) ) )
+			.ToArray();
+		var selected = SelectRecoveryCandidate( candidates );
+		if ( string.IsNullOrWhiteSpace( selected ) )
+			return false;
+
+		var asset = AssetSystem.RegisterFile( selected );
+		Model? model = null;
+		try
+		{
+			model = asset?.LoadResource<Model>()
+				?? Model.Load( RelativeAssetPath( selected ) );
+		}
+		catch ( Exception ex )
+		{
+			Log.Warning(
+				$"[Weapon Animator] recovered preview candidate could not be inspected: "
+				+ $"{ex.Message}" );
+		}
+		if ( asset is null || model is null || model.IsError || model.BoneCount == 0 )
+			return false;
+
+		var previous = document.Source.CompiledModelPath;
+		document.Source.CompiledModelPath = asset.Path;
+		document.Source.Compiled = true;
+		document.Source.PreviewHostCompiled = false;
+		message =
+			$"Recovered the source weapon preview from '{previous}' to '{asset.Path}' "
+			+ $"({model.BoneCount} bones). Save the project to retain the repaired path.";
+		Log.Warning( $"[Weapon Animator] {message}" );
+		return true;
+	}
+
+	internal static string SelectRecoveryCandidateForTests(
+		IEnumerable<PreviewModelRecoveryCandidate> candidates ) =>
+		SelectRecoveryCandidate( candidates );
+
+	private static string SelectRecoveryCandidate(
+		IEnumerable<PreviewModelRecoveryCandidate> candidates ) =>
+		candidates
+			.Where( candidate => candidate.HasCompiledArtifact )
+			.OrderByDescending( candidate => candidate.HasVersionMarker )
+			.ThenByDescending( candidate => candidate.LastWriteUtc )
+			.ThenBy( candidate => candidate.AbsolutePath, StringComparer.OrdinalIgnoreCase )
+			.Select( candidate => candidate.AbsolutePath )
+			.FirstOrDefault() ?? "";
+
+	private static bool SourceAssetExists( string relativePath )
+	{
+		if ( string.IsNullOrWhiteSpace( relativePath ) )
+			return false;
+
+		try
+		{
+			var absolute = Path.IsPathRooted( relativePath )
+				? Path.GetFullPath( relativePath )
+				: Path.GetFullPath( Path.Combine(
+					GetContentRoot(),
+					relativePath.TrimStart( '/', '\\' ) ) );
+			return File.Exists( absolute ) || File.Exists( absolute + "_c" );
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	internal static string MaterialCandidateWrapperPath(
+		string cacheRoot,
+		string sourceHash,
+		IEnumerable<SourceMaterialBinding> materials ) =>
+		Path.Combine(
+			WeaponMaterialPipeline.PreviewRevisionRoot( cacheRoot, materials ),
+			"models",
+			$"source_{sourceHash[..12]}_textured.vmdl" );
+
+	public static void CleanupLegacyMaterialPreview(
+		WeaponAnimationDocument document )
+	{
+		var cacheRoot = GetPreviewCacheRoot( document.DocumentId );
+		var legacyDirectories = new[]
+		{
+			Path.Combine( cacheRoot, "materials" ),
+			Path.Combine( cacheRoot, "texture-definitions" ),
+			Path.Combine( cacheRoot, "source-textures" )
+		};
+		var staleFiles = legacyDirectories
+			.Where( Directory.Exists )
+			.SelectMany( directory => Directory.EnumerateFiles(
+				directory,
+				"*",
+				SearchOption.AllDirectories ) )
+			.ToList();
+
+		if ( staleFiles.Count > 0 )
+		{
+			AssetGenerationService.DeleteGeneratedFiles( staleFiles );
+			foreach ( var directory in legacyDirectories
+				.Where( Directory.Exists )
+				.OrderByDescending( directory => directory.Length ) )
+			{
+				try
+				{
+					Directory.Delete( directory, true );
+				}
+				catch ( Exception ex )
+				{
+					Log.Warning(
+						$"[Weapon Animator] could not remove legacy preview material folder "
+						+ $"'{directory}': {ex.Message}" );
+				}
+			}
+		}
+		CleanupUnversionedLegalPreviews( document, staleFiles );
+		if ( staleFiles.Count > 0 )
+		{
+			Log.Info(
+				$"[Weapon Animator] removed {staleFiles.Count} obsolete preview material source(s)." );
+		}
+	}
+
+	private static void CleanupUnversionedLegalPreviews(
+		WeaponAnimationDocument document,
+		List<string> removedFiles )
+	{
+		var previewRoot = Path.Combine(
+			GetContentRoot(),
+			"weaponanim_preview_cache",
+			document.DocumentId.ToString( "N" ) );
+		if ( !Directory.Exists( previewRoot ) )
+			return;
+
+		var protectedModel = string.IsNullOrWhiteSpace(
+			document.Source.CompiledModelPath )
+				? ""
+				: Path.GetFullPath( Path.Combine(
+					GetContentRoot(),
+					document.Source.CompiledModelPath.Replace(
+						'/',
+						Path.DirectorySeparatorChar ) ) );
+		foreach ( var revisionDirectory in Directory.EnumerateDirectories( previewRoot )
+			.Where( directory => !Path.GetFileName( directory ).Equals(
+				"source-textures",
+				StringComparison.OrdinalIgnoreCase ) ) )
+		{
+			var marker = Path.Combine(
+				revisionDirectory,
+				".weaponanim-preview-version" );
+			var isProtected = !string.IsNullOrWhiteSpace( protectedModel )
+				&& protectedModel.StartsWith(
+					Path.GetFullPath( revisionDirectory )
+						+ Path.DirectorySeparatorChar,
+					StringComparison.OrdinalIgnoreCase );
+			if ( isProtected || File.Exists( marker ) )
+				continue;
+
+			var revisionFiles = Directory.EnumerateFiles(
+				revisionDirectory,
+				"*",
+				SearchOption.AllDirectories )
+				.ToArray();
+			AssetGenerationService.DeleteGeneratedFiles( revisionFiles );
+			removedFiles.AddRange( revisionFiles );
+			try
+			{
+				Directory.Delete( revisionDirectory, true );
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning(
+					$"[Weapon Animator] could not remove obsolete preview revision "
+					+ $"'{revisionDirectory}': {ex.Message}" );
+			}
+		}
+	}
+
+	private static async Task<Model?> ReloadMaterialPreviewAsync(
+		string wrapperAbsolute,
+		string wrapperPath )
+	{
+		var deadline = DateTime.UtcNow.AddSeconds( 20 );
+		var nextProgressLog = DateTime.UtcNow.AddSeconds( 2 );
+		Model? model = null;
+		while ( DateTime.UtcNow <= deadline )
+		{
+			await Task.Delay( 50 );
+			var asset = AssetSystem.FindByPath( wrapperAbsolute );
+			try
+			{
+				model = asset?.LoadResource<Model>() ?? Model.Load( wrapperPath );
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning(
+					$"[Weapon Animator] preview material model reload attempt threw: {ex.Message}" );
+				model = null;
+			}
+
+			if ( model is not null && !model.IsError && model.BoneCount > 0 )
+				return model;
+
+			if ( DateTime.UtcNow >= nextProgressLog )
+			{
+				Log.Info(
+					$"[Weapon Animator] waiting for material preview '{wrapperPath}': "
+					+ $"bones={model?.BoneCount ?? 0}, "
+					+ $"error={model?.IsError.ToString() ?? "not loaded"}, "
+					+ $"assetPresent={asset is not null}, "
+					+ $"compiledArtifact={File.Exists( wrapperAbsolute + "_c" )}." );
+				nextProgressLog = DateTime.UtcNow.AddSeconds( 2 );
+			}
+		}
+
+		return model;
+	}
+
+	private static string ImportMessage(
+		Model model,
+		string selectedPath,
+		IReadOnlyCollection<SourceMaterialBinding> materials )
+	{
+		var textured = materials.Count( material => material.HasUsableTextures );
+		var materialSummary = materials.Count == 0
+			? " No source material slots were reported."
+			: $" Matched textures for {textured} of {materials.Count} material slot(s).";
+		return $"Imported {model.BoneCount} bones from {Path.GetFileName( selectedPath )}."
+			+ materialSummary;
 	}
 
 	private static List<WeaponBoneDefinition> AuditBones(

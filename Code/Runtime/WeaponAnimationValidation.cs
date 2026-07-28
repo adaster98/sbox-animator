@@ -145,6 +145,7 @@ public static class WeaponAnimationValidator
 	public static ValidationReport ValidateForGeneration( WeaponAnimationDocument document )
 	{
 		var report = ValidateCalibration( document );
+		ValidateMaterials( document, report );
 		ValidateVisibilityParts( document, report );
 
 		if ( !document.Calibration.Confirmed || document.Calibration.Snapshot is null )
@@ -261,6 +262,69 @@ public static class WeaponAnimationValidator
 		}
 
 		return report;
+	}
+
+	private static void ValidateMaterials(
+		WeaponAnimationDocument document,
+		ValidationReport report )
+	{
+		if ( document.Source.Materials.Count == 0
+			&& document.Source.NeedsModelDocWrapper )
+		{
+			report.Add(
+				ValidationSeverity.Warning,
+				"material.none",
+				"No imported material slots are recorded. Reimport the source to discover nearby textures." );
+			return;
+		}
+
+		foreach ( var duplicate in document.Source.Materials
+			.Where( material => !string.IsNullOrWhiteSpace( material.SourceMaterialPath ) )
+			.GroupBy(
+				material => material.SourceMaterialPath,
+				StringComparer.OrdinalIgnoreCase )
+			.Where( group => group.Count() > 1 ) )
+		{
+			report.Add(
+				ValidationSeverity.Error,
+				"material.duplicate_slot",
+				$"Source material slot '{duplicate.Key}' is mapped more than once.",
+				duplicate.Key );
+		}
+
+		foreach ( var duplicate in document.Source.Materials
+			.Where( material => !string.IsNullOrWhiteSpace( material.OutputName ) )
+			.GroupBy( material => material.OutputName, StringComparer.OrdinalIgnoreCase )
+			.Where( group => group.Count() > 1 ) )
+		{
+			report.Add(
+				ValidationSeverity.Error,
+				"material.duplicate_output",
+				$"Generated material name '{duplicate.Key}' is not unique.",
+				duplicate.Key );
+		}
+
+		foreach ( var material in document.Source.Materials )
+		{
+			if ( string.IsNullOrWhiteSpace( material.SourceMaterialPath ) )
+			{
+				report.Add(
+					ValidationSeverity.Error,
+					"material.slot_missing",
+					$"Material '{material.Name}' has no source slot name.",
+					material.Name );
+			}
+			if ( material.FindTexture( WeaponTextureChannel.PackedOrm ) is not null
+				&& material.FindTexture( WeaponTextureChannel.Roughness ) is null
+				&& material.FindTexture( WeaponTextureChannel.Metalness ) is null )
+			{
+				report.Add(
+					ValidationSeverity.Warning,
+					"material.packed_orm",
+					$"{material.Name} uses a packed ORM map that cannot be assigned automatically.",
+					material.Name );
+			}
+		}
 	}
 
 	private static void ValidateVisibilityParts(

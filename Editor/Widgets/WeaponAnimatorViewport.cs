@@ -348,9 +348,19 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		_controller.PoseChanged -= Update;
 		_controller.SelectionChanged -= OnSelectionChanged;
 		_controller.TimelineChanged -= Update;
-		Scene?.Destroy();
-		Scene = null;
+		ReleasePreviewScene();
 		base.OnDestroyed();
+	}
+
+	public void ReleasePreviewScene()
+	{
+		if ( Scene.IsValid() )
+			Scene.Destroy();
+		Scene = null;
+		_sourceRenderer = null;
+		_armsRenderer = null;
+		_hostRenderer = null;
+		_hostSkeleton = null;
 	}
 
 	public void TogglePlayback()
@@ -621,6 +631,9 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			var document = _controller.Document;
 			if ( !string.IsNullOrWhiteSpace( document.Source.CompiledModelPath ) )
 			{
+				// Remember failed loads too. Retrying a full scene rebuild every frame creates
+				// overlapping renderers while the scene processes deferred destruction.
+				_loadedSource = document.Source.CompiledModelPath;
 				var sourceModel = Model.Load( document.Source.CompiledModelPath );
 				if ( sourceModel is not null && !sourceModel.IsError )
 				{
@@ -628,8 +641,14 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 						.GetOrAddComponent<SkinnedModelRenderer>( false );
 					_sourceRenderer.Model = sourceModel;
 					_sourceRenderer.Enabled = true;
-					_loadedSource = document.Source.CompiledModelPath;
 					ModelDimensionsChanged?.Invoke( sourceModel.Bounds.Size );
+				}
+				else
+				{
+					Log.Warning(
+						$"[Weapon Animator] source preview model is unavailable: "
+						+ $"'{document.Source.CompiledModelPath}'. "
+						+ "The viewport will wait for a path change or a manual rebuild." );
 				}
 			}
 
@@ -839,9 +858,17 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	{
 		if ( !Scene.IsValid() )
 			return;
-		if ( _sourceRenderer is null && !string.IsNullOrWhiteSpace( _controller.Document.Source.CompiledModelPath ) )
+		var requestedSource = _controller.Document.Source.CompiledModelPath;
+		if ( _sourceRenderer is null
+			&& ShouldRetryMissingSourcePreview( requestedSource, _loadedSource ) )
 			RebuildPreview();
 	}
+
+	internal static bool ShouldRetryMissingSourcePreview(
+		string requestedSource,
+		string attemptedSource ) =>
+		!string.IsNullOrWhiteSpace( requestedSource )
+		&& !requestedSource.Equals( attemptedSource, StringComparison.OrdinalIgnoreCase );
 
 	private void AdvancePlayback()
 	{

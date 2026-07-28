@@ -12,11 +12,12 @@ public sealed class WeaponAnimationMigrationResult
 	public bool Migrated { get; init; }
 	public bool CurveSchemaMigrated { get; init; }
 	public bool RepairedLegacyIdle { get; init; }
+	public bool RepairedMaterialMetadata { get; init; }
 	public int SourceSchemaVersion { get; init; }
 	public int PreservedWeaponTracks { get; init; }
 	public int RemovedTracks { get; init; }
 	public int RemovedConstraints { get; init; }
-	public bool Changed => Migrated || RepairedLegacyIdle;
+	public bool Changed => Migrated || RepairedLegacyIdle || RepairedMaterialMetadata;
 
 	public string Summary
 	{
@@ -35,9 +36,14 @@ public sealed class WeaponAnimationMigrationResult
 					+ (RemovedConstraints > 0 ? $" and {RemovedConstraints} constraints." : ".");
 			}
 
-			return RepairedLegacyIdle
-				? "Repaired a legacy Idle bind pose that stored weapon bones in model space. "
-					+ "The original version will be backed up when this project is saved."
+			if ( RepairedLegacyIdle )
+			{
+				return "Repaired a legacy Idle bind pose that stored weapon bones in model space. "
+					+ "The original version will be backed up when this project is saved.";
+			}
+			return RepairedMaterialMetadata
+				? "Repaired imported material slot metadata so source labels are not treated "
+					+ "as asset dependencies. The original version will be backed up when saved."
 				: "";
 		}
 	}
@@ -48,6 +54,9 @@ public static class WeaponAnimationMigration
 	public static WeaponAnimationMigrationResult MigrateAndRepair(
 		WeaponAnimationDocument document )
 	{
+		document.Source ??= new SourceModelSettings();
+		document.Source.Materials ??= [];
+
 		if ( document.SchemaVersion > WeaponAnimationDocument.CurrentSchemaVersion )
 		{
 			throw new InvalidOperationException(
@@ -62,6 +71,19 @@ public static class WeaponAnimationMigration
 		var preservedTracks = 0;
 		var removedTracks = 0;
 		var removedConstraints = 0;
+		var repairedMaterialMetadata = false;
+		foreach ( var material in document.Source.Materials )
+		{
+			var storedSlot = WeaponMaterialPipeline.StoredMaterialSlot(
+				material.SourceMaterialPath );
+			if ( !storedSlot.Equals(
+				material.SourceMaterialPath,
+				StringComparison.Ordinal ) )
+			{
+				material.SourceMaterialPath = storedSlot;
+				repairedMaterialMetadata = true;
+			}
+		}
 
 		if ( separatedRigMigration )
 		{
@@ -160,6 +182,7 @@ public static class WeaponAnimationMigration
 			Migrated = migrated,
 			CurveSchemaMigrated = curveSchemaMigration,
 			RepairedLegacyIdle = repairedLegacyIdle,
+			RepairedMaterialMetadata = repairedMaterialMetadata,
 			SourceSchemaVersion = sourceVersion,
 			PreservedWeaponTracks = preservedTracks,
 			RemovedTracks = removedTracks,

@@ -12,7 +12,12 @@ public sealed record HostWeaponMesh(
 	string SourcePath,
 	string SourceRootBoneName,
 	Transform ImportTransform,
-	IReadOnlyList<string> ExcludedBranchRoots );
+	IReadOnlyList<string> ExcludedBranchRoots,
+	IReadOnlyList<HostMaterialRemap>? MaterialRemaps = null );
+
+public sealed record HostMaterialRemap(
+	string SourceMaterial,
+	string TargetMaterial );
 
 public sealed record HostAttachment(
 	string Name,
@@ -65,7 +70,9 @@ public static class ModelDocWriter
 		}
 
 		var weaponMeshNode = BuildWeaponMeshNode( weaponMesh );
-		var materialGroup = BuildMaterialGroup( weaponMesh is not null );
+		var materialGroup = BuildMaterialGroup(
+			weaponMesh is not null,
+			weaponMesh?.MaterialRemaps );
 		var attachmentList = BuildAttachmentList( attachments );
 		var boneMarkupNodes = new StringBuilder();
 		foreach ( var boneName in preservedBones
@@ -145,7 +152,9 @@ public static class ModelDocWriter
 			""";
 	}
 
-	private static string BuildMaterialGroup( bool includesImportedWeapon )
+	private static string BuildMaterialGroup(
+		bool includesImportedWeapon,
+		IEnumerable<HostMaterialRemap>? materialRemaps )
 	{
 		if ( !includesImportedWeapon )
 		{
@@ -159,21 +168,45 @@ public static class ModelDocWriter
 				""";
 		}
 
-		// Raw interchange models commonly contain material labels rather than valid VMAT paths.
-		// Keep the host carrier invisible while safely substituting unresolved weapon materials.
-		return """
-								{
-									_class = "DefaultMaterialGroup"
-									remaps =
-									[
+		var remaps = new List<HostMaterialRemap>
+		{
+			new(
+				"materials/tools/toolsinvisible.vmat",
+				"materials/tools/toolsinvisible.vmat" )
+		};
+		remaps.AddRange( materialRemaps?
+			.Where( remap => !string.IsNullOrWhiteSpace( remap.SourceMaterial )
+				&& !string.IsNullOrWhiteSpace( remap.TargetMaterial ) )
+			?? [] );
+
+		var remapText = new StringBuilder();
+		foreach ( var remap in remaps
+			.DistinctBy(
+				remap => remap.SourceMaterial,
+				System.StringComparer.OrdinalIgnoreCase )
+			.OrderBy(
+				remap => remap.SourceMaterial,
+				System.StringComparer.OrdinalIgnoreCase ) )
+		{
+			remapText.AppendLine( $$"""
 										{
-											from = "materials/tools/toolsinvisible.vmat"
-											to = "materials/tools/toolsinvisible.vmat"
+											from = "{{Escape( remap.SourceMaterial )}}"
+											to = "{{Escape( remap.TargetMaterial )}}"
 										},
-									]
-									use_global_default = true
-									global_default_material = "materials/default.vmat"
-								},
+				""" );
+		}
+
+		// Every imported slot is mapped independently. Global substitution would collapse
+		// multi-material weapons to a single texture.
+		return $$"""
+							{
+								_class = "DefaultMaterialGroup"
+								remaps =
+								[
+			{{remapText}}					]
+								use_global_default = false
+								global_default_material = "materials/default.vmat"
+							},
 			""";
 	}
 
@@ -286,11 +319,13 @@ public static class ModelDocWriter
 	public static string WriteSourceWrapper(
 		string sourcePath,
 		string sourceRootBoneName = "",
-		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots = null )
+		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots = null,
+		System.Collections.Generic.IEnumerable<HostMaterialRemap>? materialRemaps = null )
 	{
 		var modifierList = BuildSourceModifierList(
 			sourceRootBoneName,
 			excludedBranchRoots );
+		var materialGroup = BuildMaterialGroup( true, materialRemaps );
 
 		return $$"""
 			{{Header}}
@@ -305,12 +340,7 @@ public static class ModelDocWriter
 						_class = "MaterialGroupList"
 						children =
 						[
-							{
-								_class = "DefaultMaterialGroup"
-								remaps = [ ]
-								use_global_default = true
-								global_default_material = "materials/default.vmat"
-							},
+			{{materialGroup}}
 						]
 					},
 					{

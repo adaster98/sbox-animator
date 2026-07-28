@@ -156,6 +156,16 @@ public enum VisibilityRenderMode
 	BodyGroup
 }
 
+public enum WeaponTextureChannel
+{
+	BaseColor,
+	Normal,
+	Roughness,
+	Metalness,
+	AmbientOcclusion,
+	PackedOrm
+}
+
 public sealed class WeaponAnimationDocument
 {
 	public const int CurrentSchemaVersion = 4;
@@ -267,6 +277,37 @@ public sealed class SourceModelSettings
 	public bool Compiled { get; set; }
 	public bool PreviewHostCompiled { get; set; }
 	public DateTime LastImportedUtc { get; set; }
+	public List<SourceMaterialBinding> Materials { get; set; } = [];
+}
+
+public sealed class SourceMaterialBinding
+{
+	// Stored without a resource extension so the .wepanim compiler does not treat an
+	// imported FBX slot label as a project asset dependency.
+	public string SourceMaterialPath { get; set; } = "";
+	public string Name { get; set; } = "";
+	public string OutputName { get; set; } = "";
+
+	[JsonIgnore]
+	public string PreviewMaterialPath { get; set; } = "";
+	public List<SourceTextureMap> Textures { get; set; } = [];
+
+	public SourceTextureMap? FindTexture( WeaponTextureChannel channel ) =>
+		Textures.FirstOrDefault( texture => texture.Channel == channel );
+
+	public bool HasUsableTextures =>
+		Textures.Any( texture => texture.Channel != WeaponTextureChannel.PackedOrm
+			&& !string.IsNullOrWhiteSpace( texture.AssetPath ) );
+}
+
+public sealed class SourceTextureMap
+{
+	public WeaponTextureChannel Channel { get; set; }
+
+	[JsonIgnore]
+	public string OriginalPath { get; set; } = "";
+	public string AssetPath { get; set; } = "";
+	public string Sha256 { get; set; } = "";
 }
 
 public sealed class WeaponRigDefinition

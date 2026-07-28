@@ -12,6 +12,7 @@ A native S&box editor tool for preparing rigged weapon models, posing Facepunch 
 
 - A dedicated weapon-animation workspace with its own preview scene.
 - Import support for rigged FBX, SMD, DMX, and VMDL models.
+- Automatic nearby texture discovery with separate materials for each weapon material slot.
 - Weapon hierarchy filtering for models containing unwanted arm or camera rigs.
 - Visual scale calibration, measurements, alignment tools, and output anchors.
 - Facepunch first-person arms with hand targets, elbow controls, finger posing, and reusable grip poses.
@@ -46,6 +47,7 @@ The workspace can also be opened from **Tools → Weapon Animator**. No active s
 ## 1. Import and calibrate
 
 1. Press **Import rigged model** and select your weapon.
+   - For FBX imports, keep common color, normal, roughness, metalness, and ambient-occlusion images in a nearby `Textures` or `Materials` folder. They are matched and previewed automatically.
 2. Choose the weapon's hierarchy root.
 3. Review the retained bones and exclude unrelated branches such as imported character arms.
 4. Set the weapon's physical scale using the reference arms, model dimensions, or measurement tool.
@@ -55,6 +57,8 @@ The workspace can also be opened from **Tools → Weapon Animator**. No active s
 8. Confirm the rig and continue to the animation workspace.
 
 The original imported model is not modified.
+
+If textures are added or changed later, use **Tools → Refresh Materials**. The generated viewmodel receives its own compiled textures and VMAT assets, with specular enabled and metalness enabled when a metalness map is present.
 
 ## 2. Bind the arms
 
@@ -142,7 +146,7 @@ Only files owned by the Weapon Animator are replaced when generating again.
 ## Beta limitations
 
 - Facepunch first-person human arms are the only supported arm profile.
-- Imported weapons must already contain usable bones, skin weights, and compatible materials.
+- Imported weapons must already contain usable bones and skin weights. Automatic material matching depends on recognizable material and texture names.
 - Weapon rigs vary considerably, so hierarchy filtering and hand placement require manual review.
 - Imported foreign character meshes are not automatically removed from the source model.
 - Missing action clips may use idle or no-op fallbacks; Idle is required for generation.

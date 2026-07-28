@@ -17,6 +17,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private readonly WeaponSourceImporter _importer = new();
 	private readonly AssetGenerationService _generator = new();
 	private bool _generating;
+	private bool _refreshingMaterials;
 	private Asset? _asset;
 	private WeaponAnimationAsset? _resource;
 	private Widget? _root;
@@ -64,9 +65,12 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		_resource = asset?.LoadResource<WeaponAnimationAsset>() ?? new WeaponAnimationAsset();
 		var document = _resource.Document ?? WeaponAnimationDocument.CreateDefault( asset?.Name ?? "New Weapon" );
 		_migration = MigrateAndRepair( document );
+		var sourceRecovered = WeaponSourceImporter.TryRecoverMissingPreviewModel(
+			document,
+			out var sourceRecoveryMessage );
 		_migrationBackupRequired = _migration.Changed;
 		_controller.SetDocument( document );
-		if ( _migration.Changed )
+		if ( _migration.Changed || sourceRecovered )
 			_controller.ReplaceWithoutHistory( document, true );
 
 		if ( document.ActiveStage == WeaponAnimatorStage.Animate
@@ -78,7 +82,9 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		BuildWorkspace();
 		if ( !OfferRecovery() )
 			OfferCachedImportRecovery();
-		if ( _migration.Changed )
+		if ( sourceRecovered )
+			_statusPanel?.SetMessage( sourceRecoveryMessage, ValidationSeverity.Warning );
+		else if ( _migration.Changed )
 			_statusPanel?.SetMessage( _migration.Summary, ValidationSeverity.Warning );
 		RefreshTitle();
 	}
@@ -172,9 +178,18 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		SaveWorkspaceState();
 		MenuBar.Clear();
 		BuildMenuBar();
+		var sourceRecovered = false;
+		var sourceRecoveryMessage = "";
+		_controller.Mutate(
+			"Recover missing source preview",
+			document => sourceRecovered = WeaponSourceImporter.TryRecoverMissingPreviewModel(
+				document,
+				out sourceRecoveryMessage ) );
 		if ( _controller.Document.Source.Compiled )
 			PreviewHostBuilder.Build( _controller.Document );
 		BuildWorkspace();
+		if ( sourceRecovered )
+			_statusPanel?.SetMessage( sourceRecoveryMessage, ValidationSeverity.Warning );
 	}
 
 	private void BuildMenuBar()
@@ -221,6 +236,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		tools.AddOption( "Validate", "rule", Validate );
 		tools.AddOption( "Rebuild Preview Rig", "refresh", RebuildPreviewHost );
 		tools.AddOption( "Reimport Source", "published_with_changes", ReimportSource );
+		tools.AddOption( "Refresh Materials", "texture", RefreshMaterials );
 		tools.AddOption( "Open Generated Folder", "folder", OpenGeneratedFolder );
 	}
 
@@ -508,6 +524,8 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 	private void DestroyWorkspace()
 	{
+		// Destroy the private scene synchronously before replacing its widget tree.
+		_viewport?.ReleasePreviewScene();
 		if ( _root.IsValid() )
 			_root!.Destroy();
 		_root = null;
@@ -574,6 +592,88 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			result?.Message ?? "Reimport failed.",
 			result?.Success == true ? ValidationSeverity.Info : ValidationSeverity.Error );
 		_viewport?.RebuildPreview();
+	}
+
+	private async void RefreshMaterials()
+	{
+		if ( _refreshingMaterials || _generating )
+		{
+			_statusPanel?.SetMessage(
+				"Material refresh or generation is already in progress.",
+				ValidationSeverity.Warning );
+			return;
+		}
+
+		_refreshingMaterials = true;
+		Log.Info( "[Weapon Animator] manual material refresh requested." );
+		try
+		{
+			_statusPanel?.SetMessage(
+				"Discovering and compiling source materials…",
+				ValidationSeverity.Info );
+			var result = await RefreshMaterialsCoreAsync( "Refresh source materials" );
+			_statusPanel?.SetMessage(
+				result.Message,
+				result.Success
+					? ValidationSeverity.Info
+					: ValidationSeverity.Error );
+		}
+		catch ( Exception ex )
+		{
+			Log.Error( $"[Weapon Animator] material refresh threw: {ex}" );
+			_statusPanel?.SetMessage(
+				$"Material refresh failed: {ex.Message}",
+				ValidationSeverity.Error );
+		}
+		finally
+		{
+			_refreshingMaterials = false;
+			RefreshToolbarState();
+		}
+	}
+
+	private async System.Threading.Tasks.Task<SourceImportResult> RefreshMaterialsCoreAsync(
+		string historyDescription )
+	{
+		var recovered = false;
+		var recoveryMessage = "";
+		_controller.Mutate(
+			"Recover missing source preview",
+			document => recovered = WeaponSourceImporter.TryRecoverMissingPreviewModel(
+				document,
+				out recoveryMessage ) );
+		if ( recovered )
+		{
+			_viewport?.RebuildPreview();
+			_statusPanel?.SetMessage( recoveryMessage, ValidationSeverity.Warning );
+		}
+
+		var documentId = _controller.Document.DocumentId;
+		var sourceHash = _controller.Document.Source.SourceHash;
+		var result = await _importer.RefreshMaterialsAsync( _controller.Document );
+		if ( !result.Success )
+			return result;
+
+		if ( _controller.Document.DocumentId != documentId
+			|| !string.Equals(
+				_controller.Document.Source.SourceHash,
+				sourceHash,
+				StringComparison.OrdinalIgnoreCase ) )
+		{
+			return new SourceImportResult
+			{
+				Success = false,
+				Message = "The open document or source changed while materials were compiling; "
+					+ "the candidate preview was not applied."
+			};
+		}
+
+		_controller.Mutate(
+			historyDescription,
+			document => WeaponSourceImporter.ApplyMaterialRefresh( document, result ) );
+		_viewport?.RebuildPreview();
+		WeaponSourceImporter.CleanupLegacyMaterialPreview( _controller.Document );
+		return result;
 	}
 
 	private void AutoAlign()
@@ -813,11 +913,30 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		// Compiling waits on the asset system across frames, so keep a second press from
 		// starting a competing run over the same output files.
 		if ( _generating )
+		{
+			_statusPanel?.SetMessage(
+				"Asset generation is already in progress.",
+				ValidationSeverity.Warning );
 			return;
+		}
 
 		_generating = true;
+		Log.Info( "[Weapon Animator] asset generation requested." );
 		try
 		{
+			if ( WeaponMaterialPipeline.RequiresPreviewRefresh( _controller.Document ) )
+			{
+				var materialImport = await RefreshMaterialsCoreAsync(
+					"Discover source materials" );
+				if ( !materialImport.Success )
+				{
+					_statusPanel?.SetMessage(
+						materialImport.Message,
+						ValidationSeverity.Error );
+					return;
+				}
+			}
+
 			_statusPanel?.SetMessage( "Generating and compiling assets…", ValidationSeverity.Info );
 			var result = await _generator.GenerateAsync( _controller.Document );
 			if ( result.Success )

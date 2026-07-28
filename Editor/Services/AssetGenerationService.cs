@@ -23,7 +23,7 @@ public sealed class GenerationResult
 
 public sealed class AssetGenerationService
 {
-	public const string GeneratorVersion = "1.9.0";
+	public const string GeneratorVersion = "2.0.1";
 	private const string ManifestFile = "weaponanim.manifest.json";
 
 	public async Task<GenerationResult> GenerateAsync( WeaponAnimationDocument document )
@@ -64,10 +64,12 @@ public sealed class AssetGenerationService
 		var diagnostics = new List<GenerationDiagnostic>();
 		HostSkeleton skeleton;
 		Dictionary<string, string> files;
+		IReadOnlyList<WeaponMaterialPipeline.GeneratedTextureCopy> textureCopies;
 		try
 		{
 			skeleton = HostSkeletonBuilder.Build( document );
 			files = BuildFiles( document, skeleton, relativeRoot );
+			textureCopies = WeaponMaterialPipeline.BuildOutputTextureCopies( document );
 		}
 		catch ( Exception ex )
 		{
@@ -81,7 +83,11 @@ public sealed class AssetGenerationService
 			.Select( x => x.RelativePath )
 			.ToHashSet( StringComparer.OrdinalIgnoreCase );
 
-		foreach ( var file in files.Keys )
+		var generatedSourcePaths = files.Keys
+			.Concat( textureCopies.Select( copy => copy.RelativePath ) )
+			.Distinct( StringComparer.OrdinalIgnoreCase )
+			.ToArray();
+		foreach ( var file in generatedSourcePaths )
 		{
 			var absolute = Path.Combine( outputRoot, file );
 			if ( File.Exists( absolute ) && !previousFiles.Contains( file ) )
@@ -117,18 +123,28 @@ public sealed class AssetGenerationService
 			Directory.CreateDirectory( outputRoot );
 			PrepareCompiledConsumersForRewrite(
 				outputRoot,
-				files.Keys,
+				generatedSourcePaths,
 				backups,
 				newFiles );
+			WriteTextureCopies(
+				outputRoot,
+				textureCopies,
+				backups,
+				newFiles,
+				previousFiles );
 			WriteFiles( outputRoot, files, backups, newFiles, previousFiles );
-			VerifyGeneratedSources( outputRoot, files.Keys );
-			RegisterGeneratedDependencies( outputRoot, files.Keys );
+			VerifyGeneratedSources( outputRoot, generatedSourcePaths );
+			RegisterGeneratedDependencies( outputRoot, generatedSourcePaths );
 
 			await CompileAndInspectAsync( document, outputRoot, relativeRoot, skeleton, diagnostics );
 			if ( diagnostics.Any( x => x.Severity == ValidationSeverity.Error ) )
 				throw new InvalidOperationException( "One or more generated assets failed to compile or reload." );
 
-			RemoveObsoleteOwnedFiles( document, outputRoot, files.Keys, diagnostics );
+			RemoveObsoleteOwnedFiles(
+				document,
+				outputRoot,
+				generatedSourcePaths,
+				diagnostics );
 			var inputHash = InputHash( document );
 			var generatedUtc = document.Manifest.InputHash == inputHash
 				? document.Manifest.GeneratedUtc
@@ -142,13 +158,16 @@ public sealed class AssetGenerationService
 				GeneratedUtc = generatedUtc,
 				InputHash = inputHash,
 				Diagnostics = diagnostics,
-				Files = files
-					.OrderBy( x => x.Key )
-					.Select( x => new GeneratedFileRecord
+				Files = generatedSourcePaths
+					.OrderBy( path => path )
+					.Select( path => new GeneratedFileRecord
 					{
-						RelativePath = x.Key.Replace( '\\', '/' ),
-						Sha256 = HashText( x.Value ),
-						Kind = Path.GetExtension( x.Key ).TrimStart( '.' )
+						RelativePath = path.Replace( '\\', '/' ),
+						Sha256 = files.TryGetValue( path, out var text )
+							? HashText( text )
+							: WeaponSourceImporter.HashFile(
+								Path.Combine( outputRoot, path ) ),
+						Kind = Path.GetExtension( path ).TrimStart( '.' )
 					} )
 					.ToList()
 			};
@@ -167,7 +186,7 @@ public sealed class AssetGenerationService
 				OutputFolder = outputRoot,
 				Validation = validation,
 				Diagnostics = diagnostics,
-				GeneratedFiles = files.Keys
+				GeneratedFiles = generatedSourcePaths
 					.Append( ManifestFile )
 					.OrderBy( x => x )
 					.ToList()
@@ -194,6 +213,37 @@ public sealed class AssetGenerationService
 		}
 	}
 
+	private static void WriteTextureCopies(
+		string root,
+		IEnumerable<WeaponMaterialPipeline.GeneratedTextureCopy> copies,
+		Dictionary<string, byte[]> backups,
+		HashSet<string> newFiles,
+		IReadOnlySet<string> previouslyOwnedFiles )
+	{
+		foreach ( var copy in copies.OrderBy(
+			copy => copy.RelativePath,
+			StringComparer.OrdinalIgnoreCase ) )
+		{
+			if ( !File.Exists( copy.SourceAbsolute ) )
+				throw new FileNotFoundException(
+					$"Texture source for '{copy.RelativePath}' no longer exists.",
+					copy.SourceAbsolute );
+
+			var absolute = Path.Combine( root, copy.RelativePath );
+			var directory = Path.GetDirectoryName( absolute );
+			if ( !string.IsNullOrWhiteSpace( directory ) )
+				Directory.CreateDirectory( directory );
+			if ( File.Exists( absolute ) )
+				backups[absolute] = File.ReadAllBytes( absolute );
+			else if ( ShouldDeleteCreatedFileOnRollback(
+				copy.RelativePath,
+				previouslyOwnedFiles.Contains( copy.RelativePath ) ) )
+				newFiles.Add( absolute );
+
+			File.Copy( copy.SourceAbsolute, absolute, true );
+		}
+	}
+
 	private static void WriteFiles(
 		string root,
 		IReadOnlyDictionary<string, string> files,
@@ -208,6 +258,9 @@ public sealed class AssetGenerationService
 		foreach ( var name in OrderForWrite( files.Keys ) )
 		{
 			var absolute = Path.Combine( root, name );
+			var directory = Path.GetDirectoryName( absolute );
+			if ( !string.IsNullOrWhiteSpace( directory ) )
+				Directory.CreateDirectory( directory );
 			if ( backups is not null && File.Exists( absolute ) )
 				backups[absolute] = File.ReadAllBytes( absolute );
 			else if ( newFiles is not null
@@ -228,6 +281,11 @@ public sealed class AssetGenerationService
 		}
 	}
 
+	internal static void WriteTextSourcesForTests(
+		string root,
+		IReadOnlyDictionary<string, string> files ) =>
+		WriteFiles( root, files );
+
 	internal static IEnumerable<string> OrderForWrite( IEnumerable<string> paths ) =>
 		paths
 			.OrderBy( ConsumerWriteRank )
@@ -239,13 +297,15 @@ public sealed class AssetGenerationService
 		if ( !IsCompiledConsumer( path ) )
 			return 0;
 		if ( IsBootstrapHost( path ) )
-			return 1;
+			return 3;
 		return extension switch
 		{
-			".vanmgrph" => 2,
-			".vmdl" => 3,
-			".prefab" => 4,
-			_ => 5
+			".vtex" => 1,
+			".vmat" => 2,
+			".vanmgrph" => 4,
+			".vmdl" => 5,
+			".prefab" => 6,
+			_ => 7
 		};
 	}
 
@@ -255,7 +315,7 @@ public sealed class AssetGenerationService
 	/// files that are about to disappear.
 	/// </summary>
 	private static readonly string[] CompiledConsumerExtensions =
-		[".vmdl", ".vanmgrph", ".prefab"];
+		[".vtex", ".vmat", ".vmdl", ".vanmgrph", ".prefab"];
 
 	private static bool IsCompiledConsumer( string path ) =>
 		CompiledConsumerExtensions.Contains(
@@ -270,14 +330,16 @@ public sealed class AssetGenerationService
 
 	private static int ConsumerRemovalRank( string path ) =>
 		IsBootstrapHost( path )
-			? 1
+			? 3
 			: Path.GetExtension( path ).ToLowerInvariant() switch
-		{
-			".prefab" => 4,
-			".vmdl" => 3,
-			".vanmgrph" => 2,
-			_ => 0
-		};
+			{
+				".prefab" => 6,
+				".vmdl" => 5,
+				".vanmgrph" => 4,
+				".vmat" => 2,
+				".vtex" => 1,
+				_ => 0
+			};
 
 	private static bool IsBootstrapHost( string path ) =>
 		path.EndsWith( "_host_bootstrap.vmdl", StringComparison.OrdinalIgnoreCase )
@@ -520,6 +582,12 @@ public sealed class AssetGenerationService
 		var graphName = $"{slug}.vanmgrph";
 		var prefabName = $"v_{slug}.prefab";
 		files[referenceName] = DmxWriter.WriteReference( skeleton );
+		foreach ( var materialFile in WeaponMaterialPipeline.BuildOutputTextFiles(
+			document,
+			relativeRoot ) )
+		{
+			files[materialFile.Key] = materialFile.Value;
+		}
 
 		var clipSources = new List<(WeaponAnimationClip Clip, string Source)>();
 		foreach ( var clip in document.Clips.OrderBy( x => x.Name ) )
@@ -540,7 +608,8 @@ public sealed class AssetGenerationService
 			ResolveEmbeddableSourcePath( document ),
 			document.Source.SourceRootBoneName,
 			placement,
-			ExcludedBranchRoots( document ).ToArray() );
+			ExcludedBranchRoots( document ).ToArray(),
+			WeaponMaterialPipeline.OutputRemaps( document, relativeRoot ) );
 		var hostSource = ModelDocWriter.WriteHost(
 			$"{relativeRoot}/{referenceName}",
 			clipSources,
@@ -651,7 +720,7 @@ public sealed class AssetGenerationService
 	/// frames. Sampling <see cref="Asset.IsCompiled"/> straight afterwards reports a false
 	/// failure, so wait for the asset system to settle on a real verdict.
 	/// </summary>
-	private static async Task<bool> WaitForCompileAsync(
+	internal static async Task<bool> WaitForCompileAsync(
 		Asset asset,
 		string sourceAbsolute )
 	{
@@ -803,6 +872,19 @@ public sealed class AssetGenerationService
 				$"Failed to compile '{description ?? file}'.",
 				absolute ) );
 			return false;
+		}
+
+		var materialSources = WeaponMaterialPipeline.BuildOutputTextFiles(
+			document,
+			relativeRoot );
+		foreach ( var materialFile in materialSources.Keys
+			.Where( path => Path.GetExtension( path ).Equals(
+				".vmat",
+				StringComparison.OrdinalIgnoreCase ) )
+			.OrderBy( path => path, StringComparer.OrdinalIgnoreCase ) )
+		{
+			if ( !await Compile( materialFile, $"{materialFile} material" ) )
+				return;
 		}
 
 		var hostCompiled = false;
