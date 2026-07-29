@@ -28,7 +28,7 @@ The workspace is independent of the normal scene editor. Opening or closing it d
 
 ## Installation
 
-Clone or download this repository into your S&box project's library folder:
+Download from the [S&box Library](https://sbox.game/sonac/sbox-animator/) into your editor directly, or install manually by cloning this repository into your S&box project's library folder:
 
 ```text
 <your-project>/Libraries/sonac.sbox-animator/
