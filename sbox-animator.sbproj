@@ -1,10 +1,10 @@
 {
   "Title": "S&box Weapon Animator",
   "Type": "library",
-  "Org": "asterw",
+  "Org": "sonac",
   "Ident": "sbox-animator",
   "Schema": 1,
-  "IncludeSourceFiles": true,
+  "IncludeSourceFiles": false,
   "HasAssets": false,
   "Resources": null,
   "PackageReferences": [],
@@ -12,6 +12,7 @@
   "Mounts": null,
   "IsStandaloneOnly": false,
   "Metadata": {
+    "Description": "Create first-person weapon animations and generate ready-to-use S&box viewmodels.",
     "Compiler": {
       "RootNamespace": "SboxWeaponAnimator",
       "GenerateDocumentation": true,
