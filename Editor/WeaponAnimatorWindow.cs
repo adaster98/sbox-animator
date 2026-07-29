@@ -123,7 +123,9 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			() =>
 			{
 				Dialog.AskConfirm(
-					CloseAfterPrompt,
+					// Discarding closes without saving, but the autosave snapshot is kept so the
+					// work is still recoverable on the next open. Only Save clears it.
+					() => CloseAfterPrompt( clearRecovery: false ),
 					"Discard all unsaved changes to this Weapon Animation Project?",
 					"Discard Changes",
 					"Discard",
@@ -315,7 +317,6 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 		var rigPanel = new RigAuditPanel( _controller );
 		rigPanel.ImportRequested += ImportSource;
-		rigPanel.ResetTestPoseRequested += _viewport.ResetTestPose;
 		rigPanel.RigReviewConfirmed += RebuildPreviewHost;
 
 		var inspector = new CalibrationInspectorPanel( _controller );
@@ -1136,7 +1137,17 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 				if ( requestedVersion != _recoveryRequestVersion )
 					continue;
 
-				RecoveryService.Write( _controller.Document );
+				// Re-check after the wait. Saving inside the quiet period clears the recovery
+				// file, and writing it back would make the next open offer to restore a snapshot
+				// of an already-saved project.
+				if ( _closing || !_controller.IsDirty )
+					return;
+
+				// Serialize on the main thread: the continuation above can resume on a worker,
+				// and the document may be mutated while it is being written.
+				await GameTask.MainThread();
+				if ( !_closing && _controller.IsDirty )
+					RecoveryService.Write( _controller.Document );
 				return;
 			}
 		}
@@ -1300,11 +1311,12 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		_importer.Import( document, source );
 	}
 
-	private void CloseAfterPrompt()
+	private void CloseAfterPrompt( bool clearRecovery = true )
 	{
 		_closing = true;
 		_recoveryRequestVersion++;
-		RecoveryService.Clear( _controller.Document.DocumentId );
+		if ( clearRecovery )
+			RecoveryService.Clear( _controller.Document.DocumentId );
 		_allowClose = true;
 		Close();
 	}

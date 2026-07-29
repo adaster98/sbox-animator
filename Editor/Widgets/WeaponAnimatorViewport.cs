@@ -209,8 +209,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private bool _armPoseDiagnosticsLogged;
 	private int _armPoseDiagnosticFrames;
 	private Vector2 _lastMouse;
-	private readonly Dictionary<string, Transform> _testPose = new( StringComparer.OrdinalIgnoreCase );
 	private string _calibrationGizmoTarget = "";
+	private Transform _calibrationGizmoStartWorld;
+	private Transform _calibrationGizmoStartLocal;
+	private Vector3 _calibrationGizmoMoveDelta;
+	private Vector3 _calibrationGizmoScaleDelta;
 	private string _animationGizmoTarget = "";
 	private RigControlKind _animationGizmoKind;
 	private Transform _animationGizmoStartLocal;
@@ -581,13 +584,6 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			WeaponAnimatorTransformMode.Scale => "Scale",
 			_ => "Move"
 		};
-
-	public void ResetTestPose()
-	{
-		_testPose.Clear();
-		_sourceRenderer?.ClearPhysicsBones();
-		StatusChanged?.Invoke( "Temporary movement test pose reset." );
-	}
 
 	public void SetPickMode( ViewportPickMode mode )
 	{
@@ -1026,7 +1022,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			_sourceRenderer.WorldTransform = WeaponAnimationMath.Compose(
 				document.Calibration.PhysicalTransform,
 				document.Calibration.FramingTransform );
-			ApplyTestPose();
+			_sourceRenderer.ClearPhysicsBones();
 		}
 
 		if ( _armsRenderer.IsValid() )
@@ -1040,11 +1036,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		if ( document.Workspace.ShowSkeleton )
 			DrawRendererSkeleton( _sourceRenderer, WeaponAnimatorTheme.Amber );
 
+		// Calibration only ever poses the weapon as a whole, plus its anchors. Selecting a bone
+		// no longer suppresses the rig gizmo, which previously left the page with no gizmo at all.
 		if ( CalibrationSelection.TryGetAnchor( document.Workspace.SelectedControl, out var anchorKind )
 			&& document.Calibration.GetAnchor( anchorKind ) is { } anchor )
 			DrawSelectedAnchorControl( anchor );
-		else if ( !string.IsNullOrWhiteSpace( document.Workspace.SelectedBone ) )
-			DrawSelectedSourceBoneControl();
 		else
 			DrawWholeRigControl();
 	}
@@ -1417,20 +1413,6 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				"weapon_root" ) is not null}." );
 	}
 
-	private void ApplyTestPose()
-	{
-		if ( !_sourceRenderer.IsValid() )
-			return;
-
-		_sourceRenderer!.ClearPhysicsBones();
-		foreach ( var item in _testPose )
-		{
-			var bone = _sourceRenderer.Model.Bones.GetBone( item.Key );
-			if ( bone is not null )
-				_sourceRenderer.SetBoneTransform( bone, item.Value );
-		}
-	}
-
 	private void DrawRendererSkeleton( SkinnedModelRenderer? renderer, Color color )
 	{
 		if ( !renderer.IsValid() || renderer!.Model is null )
@@ -1587,54 +1569,29 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		Gizmo.Draw.SolidSphere( targetTransform.Position, 0.18f, 8, 6 );
 	}
 
-	private void DrawSelectedSourceBoneControl()
-	{
-		if ( !_sourceRenderer.IsValid() )
-			return;
-		var selected = _controller.Document.Workspace.SelectedBone;
-		var bone = _sourceRenderer!.Model.Bones.GetBone( selected );
-		if ( bone is null || !_sourceRenderer.TryGetBoneTransform( bone, out var world ) )
-			return;
-
-		using var scope = Gizmo.Scope( $"test:{selected}", world );
-		if ( TransformMode == WeaponAnimatorTransformMode.Rotate )
-		{
-			if ( Gizmo.Control.Rotate( "rotate", Rotation.Identity, out var delta ) )
-			{
-				var changed = world;
-				changed.Rotation *= SnapRotation( delta );
-				_testPose[selected] = changed;
-			}
-		}
-		else if ( TransformMode == WeaponAnimatorTransformMode.Move
-			&& Gizmo.Control.Position( "move", world.Position, out var position ) )
-		{
-			position = SnapAbsolutePosition( world.Position, position, world.Rotation );
-			var changed = world.WithPosition( position );
-			_testPose[selected] = changed;
-		}
-		else if ( TransformMode == WeaponAnimatorTransformMode.Scale )
-		{
-			var uniformScale = MathF.Max( world.Scale.x, 0.0001f );
-			if ( Gizmo.Control.Scale( "scale", uniformScale, out var scale ) )
-			{
-				var ratio = MathF.Max( scale, 0.0001f ) / uniformScale;
-				_testPose[selected] = world.WithScale(
-					ClampScale( world.Scale * ratio ) );
-			}
-		}
-	}
-
 	private void DrawSelectedAnchorControl( WeaponAnchor anchor )
 	{
 		if ( !_sourceRenderer.IsValid() )
 			return;
 
 		var sourceTransform = _sourceRenderer!.WorldTransform;
-		var world = new Transform(
+		var liveWorld = new Transform(
 			sourceTransform.PointToWorld( anchor.LocalPosition ),
 			sourceTransform.Rotation * anchor.LocalRotation );
-		using var scope = Gizmo.Scope( $"anchor_control:{anchor.Kind}", world );
+		var token = $"anchor:{anchor.Kind}";
+		var dragging = IsCalibrationDrag( token );
+		var startWorld = dragging ? _calibrationGizmoStartWorld : liveWorld;
+		var startLocal = dragging
+			? _calibrationGizmoStartLocal
+			: new Transform( anchor.LocalPosition, anchor.LocalRotation );
+		var basis = CalibrationGizmoBasis( startWorld );
+
+		// Scale is deliberately dropped from the scope. Feeding the gizmo a scaled transform
+		// resizes its handles by the calibration scale, and feeding it a rotated one makes the
+		// handles point along the rig's local axes while the result is applied in world space.
+		using var scope = Gizmo.Scope(
+			$"anchor_control:{anchor.Kind}",
+			new Transform( startWorld.Position, basis ) );
 		Gizmo.Draw.Color = AnchorColor( anchor.Kind );
 		Gizmo.Draw.LineSphere( new Sphere( Vector3.Zero, 0.24f ) );
 
@@ -1642,32 +1599,49 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		{
 			if ( Gizmo.Control.Rotate( "anchor_rotate", Rotation.Identity, out var delta ) )
 			{
-				UpdateCalibrationGizmo(
-					$"anchor:{anchor.Kind}:rotate",
+				BeginCalibrationGizmoDrag(
+					token,
 					$"Rotate {anchor.Name} anchor",
-					document =>
+					liveWorld,
+					new Transform( anchor.LocalPosition, anchor.LocalRotation ) );
+				// Rotate reports the total rotation since the grab, so it applies to the start.
+				var snapped = SnapRotation( delta );
+				var rotation = _controller.Document.Workspace.LocalGizmos
+					? (startLocal.Rotation * snapped).Normal
+					: (sourceTransform.Rotation.Inverse
+						* snapped
+						* sourceTransform.Rotation
+						* startLocal.Rotation).Normal;
+				_controller.UpdateContinuousEdit( document =>
 				{
 					var selected = document.Calibration.GetAnchor( anchor.Kind );
 					if ( selected is null )
 						return;
-					selected.LocalRotation *= SnapRotation( delta );
+					selected.LocalRotation = rotation;
 					document.Calibration.Confirmed = false;
 				} );
 			}
 		}
 		else if ( TransformMode == WeaponAnimatorTransformMode.Move
-			&& Gizmo.Control.Position( "anchor_move", world.Position, out var position ) )
+			&& Gizmo.Control.Position( "anchor_move", Vector3.Zero, out var moveDelta, basis ) )
 		{
-			position = SnapAbsolutePosition( world.Position, position, world.Rotation );
-			UpdateCalibrationGizmo(
-				$"anchor:{anchor.Kind}:move",
+			BeginCalibrationGizmoDrag(
+				token,
 				$"Move {anchor.Name} anchor",
-				document =>
+				liveWorld,
+				new Transform( anchor.LocalPosition, anchor.LocalRotation ) );
+			_calibrationGizmoMoveDelta += moveDelta;
+			var world = SnapPositionDelta(
+				_calibrationGizmoStartWorld.Position,
+				_calibrationGizmoMoveDelta,
+				basis );
+			var local = sourceTransform.PointToLocal( world );
+			_controller.UpdateContinuousEdit( document =>
 			{
 				var selected = document.Calibration.GetAnchor( anchor.Kind );
 				if ( selected is null )
 					return;
-				selected.LocalPosition = sourceTransform.PointToLocal( position );
+				selected.LocalPosition = local;
 				document.Calibration.Confirmed = false;
 			} );
 		}
@@ -1676,103 +1650,135 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private void DrawWholeRigControl()
 	{
 		var document = _controller.Document;
-		var transform = document.Workspace.FirstPersonPreview
+		var framing = document.Workspace.FirstPersonPreview;
+		var live = framing
 			? document.Calibration.FramingTransform
 			: document.Calibration.PhysicalTransform;
-		using var scope = Gizmo.Scope( "whole_rig", transform );
+		var token = framing ? "rig:framing" : "rig:physical";
+		var dragging = IsCalibrationDrag( token );
+		var start = dragging ? _calibrationGizmoStartWorld : live;
+		var basis = CalibrationGizmoBasis( start );
+
+		using var scope = Gizmo.Scope(
+			"whole_rig",
+			new Transform( start.Position, basis ) );
+		Gizmo.Draw.Color = WeaponAnimatorTheme.Amber;
+		Gizmo.Draw.LineSphere( new Sphere( Vector3.Zero, 0.3f ) );
 
 		if ( TransformMode == WeaponAnimatorTransformMode.Rotate )
 		{
 			if ( Gizmo.Control.Rotate( "rig_rotate", Rotation.Identity, out var delta ) )
 			{
-				UpdateCalibrationGizmo(
-					"whole_rig:rotate",
-					"Refine whole-rig rotation",
-					d =>
-				{
-					var target = d.Workspace.FirstPersonPreview
-						? d.Calibration.FramingTransform
-						: d.Calibration.PhysicalTransform;
-					target.Rotation *= SnapRotation( delta );
-					if ( d.Workspace.FirstPersonPreview )
-						d.Calibration.FramingTransform = target;
-					else
-					{
-						d.Calibration.PhysicalTransform = target;
-						d.Calibration.Confirmed = false;
-					}
-				} );
+				BeginCalibrationGizmoDrag( token, "Refine whole-rig rotation", live, live );
+				var snapped = SnapRotation( delta );
+				var rotation = document.Workspace.LocalGizmos
+					? (_calibrationGizmoStartWorld.Rotation * snapped).Normal
+					: (snapped * _calibrationGizmoStartWorld.Rotation).Normal;
+				_controller.UpdateContinuousEdit( d =>
+					SetRigTransform( d, framing, target => target.WithRotation( rotation ) ) );
 			}
 		}
 		else if ( TransformMode == WeaponAnimatorTransformMode.Move
-			&& Gizmo.Control.Position( "rig_move", transform.Position, out var position ) )
+			&& Gizmo.Control.Position( "rig_move", Vector3.Zero, out var moveDelta, basis ) )
 		{
-			position = SnapAbsolutePosition( transform.Position, position, transform.Rotation );
-			UpdateCalibrationGizmo(
-					"whole_rig:move",
-					"Refine whole-rig position",
-					d =>
-				{
-					if ( d.Workspace.FirstPersonPreview )
-						d.Calibration.FramingTransform =
-							d.Calibration.FramingTransform.WithPosition( position );
-					else
-					{
-						d.Calibration.PhysicalTransform =
-							d.Calibration.PhysicalTransform.WithPosition( position );
-						d.Calibration.Confirmed = false;
-					}
-				} );
+			BeginCalibrationGizmoDrag( token, "Refine whole-rig position", live, live );
+			_calibrationGizmoMoveDelta += moveDelta;
+			var position = SnapPositionDelta(
+				_calibrationGizmoStartWorld.Position,
+				_calibrationGizmoMoveDelta,
+				basis );
+			_controller.UpdateContinuousEdit( d =>
+				SetRigTransform( d, framing, target => target.WithPosition( position ) ) );
 		}
-		else if ( TransformMode == WeaponAnimatorTransformMode.Scale )
+		else if ( TransformMode == WeaponAnimatorTransformMode.Scale
+			&& Gizmo.Control.Scale( "rig_scale", Vector3.Zero, out var scaleDelta, basis ) )
 		{
-			var uniformScale = MathF.Max( transform.Scale.x, 0.0001f );
-			if ( Gizmo.Control.Scale( "rig_scale", uniformScale, out var scale ) )
+			BeginCalibrationGizmoDrag( token, "Refine whole-rig scale", live, live );
+			_calibrationGizmoScaleDelta += scaleDelta / 0.01f;
+			// Rig scale is uniform, so respond to whichever handle is being dragged rather than
+			// only the X axis. The uniform centre handle reports all three equally.
+			var dominant = DominantAxis( _calibrationGizmoScaleDelta );
+			var factor = MathF.Max(
+				1.0f + dominant * ScaleGizmoSensitivity,
+				0.0001f );
+			var uniform = MathF.Max(
+				_calibrationGizmoStartWorld.Scale.x * factor,
+				0.0001f );
+			_controller.UpdateContinuousEdit( d =>
 			{
-				scale = MathF.Max( scale, 0.0001f );
-				UpdateCalibrationGizmo(
-					"whole_rig:scale",
-					"Refine whole-rig scale",
-					d =>
-				{
-					var target = d.Workspace.FirstPersonPreview
-						? d.Calibration.FramingTransform
-						: d.Calibration.PhysicalTransform;
-					target.Scale = new Vector3( scale );
-					if ( d.Workspace.FirstPersonPreview )
-						d.Calibration.FramingTransform = target;
-					else
-					{
-						d.Calibration.PhysicalTransform = target;
-						d.Calibration.UniformScale = scale;
-						d.Calibration.Confirmed = false;
-					}
-				} );
-			}
+				SetRigTransform( d, framing, target => target.WithScale( uniform ) );
+				if ( !framing )
+					d.Calibration.UniformScale = uniform;
+			} );
 		}
 	}
 
-	private void UpdateCalibrationGizmo(
-		string target,
-		string description,
-		Action<WeaponAnimationDocument> mutation )
+	internal static float DominantAxis( Vector3 value )
 	{
-		if ( !_calibrationGizmoTarget.Equals(
-			target,
-			StringComparison.OrdinalIgnoreCase ))
+		var dominant = value.x;
+		if ( MathF.Abs( value.y ) > MathF.Abs( dominant ) )
+			dominant = value.y;
+		if ( MathF.Abs( value.z ) > MathF.Abs( dominant ) )
+			dominant = value.z;
+		return dominant;
+	}
+
+	// The whole rig and its anchors are authored in world space unless Local is toggled on.
+	private Rotation CalibrationGizmoBasis( Transform start ) =>
+		_controller.Document.Workspace.LocalGizmos
+			? start.Rotation
+			: Rotation.Identity;
+
+	private static void SetRigTransform(
+		WeaponAnimationDocument document,
+		bool framing,
+		Func<Transform, Transform> edit )
+	{
+		if ( framing )
 		{
-			EndCalibrationGizmoDrag();
-			_calibrationGizmoTarget = target;
-			_controller.BeginContinuousEdit( description );
+			document.Calibration.FramingTransform =
+				edit( document.Calibration.FramingTransform );
+			return;
 		}
 
-		_controller.UpdateContinuousEdit( mutation );
+		document.Calibration.PhysicalTransform =
+			edit( document.Calibration.PhysicalTransform );
+		document.Calibration.Confirmed = false;
+	}
+
+	private bool IsCalibrationDrag( string target ) =>
+		_calibrationGizmoTarget.Equals( target, StringComparison.Ordinal );
+
+	// Calibration gizmos accumulate into one undo entry, matching the animation gizmos below.
+	private void BeginCalibrationGizmoDrag(
+		string target,
+		string description,
+		Transform startWorld,
+		Transform startLocal )
+	{
+		// Reopen if an unrelated mutation closed our continuous edit mid-drag, otherwise
+		// UpdateContinuousEdit silently discards the rest of the drag.
+		if ( IsCalibrationDrag( target ) && _controller.IsContinuousEditActive )
+			return;
+
+		EndCalibrationGizmoDrag();
+		_calibrationGizmoTarget = target;
+		_calibrationGizmoStartWorld = startWorld;
+		_calibrationGizmoStartLocal = startLocal;
+		_calibrationGizmoMoveDelta = Vector3.Zero;
+		_calibrationGizmoScaleDelta = Vector3.Zero;
+		_controller.BeginContinuousEdit( description );
 	}
 
 	private void FinishCalibrationGizmoDragIfReleased()
 	{
-		if ( string.IsNullOrWhiteSpace( _calibrationGizmoTarget )
-			|| Gizmo.Pressed.Any )
+		if ( string.IsNullOrEmpty( _calibrationGizmoTarget ) )
+			return;
+
+		// Requires both signals. Gizmo.Pressed can read false between frames while the mouse is
+		// still held, and ending on that alone splits one drag into an undo entry per frame.
+		if ( Gizmo.Pressed.Any
+			|| global::Editor.Application.MouseButtons.HasFlag( MouseButtons.Left ) )
 			return;
 
 		EndCalibrationGizmoDrag();
@@ -1780,10 +1786,12 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 	private void EndCalibrationGizmoDrag()
 	{
-		if ( string.IsNullOrWhiteSpace( _calibrationGizmoTarget ) )
+		if ( string.IsNullOrEmpty( _calibrationGizmoTarget ) )
 			return;
 
 		_calibrationGizmoTarget = "";
+		_calibrationGizmoMoveDelta = Vector3.Zero;
+		_calibrationGizmoScaleDelta = Vector3.Zero;
 		_controller.EndContinuousEdit();
 	}
 
@@ -1914,17 +1922,6 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			return start + movement;
 
 		return Gizmo.Snap( start, movement, localSpace );
-	}
-
-	private Vector3 SnapAbsolutePosition(
-		Vector3 start,
-		Vector3 position,
-		Rotation localSpace )
-	{
-		if ( !_controller.Document.Workspace.SnapPosition )
-			return position;
-
-		return Gizmo.Snap( start, position - start, localSpace );
 	}
 
 	internal static Transform WorldToLocal( Transform world, Transform? parent ) =>

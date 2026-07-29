@@ -25,6 +25,10 @@ public sealed class WeaponAnimatorController
 	public IReadOnlyCollection<Guid> SelectedKeys => _selectedKeys;
 	public bool IsPlaying => _isPlaying;
 
+	// Gizmo drag drivers must be able to tell that an unrelated Mutate closed their continuous
+	// edit, otherwise UpdateContinuousEdit silently discards the rest of the drag.
+	public bool IsContinuousEditActive => _continuousBefore is not null;
+
 	private readonly HashSet<Guid> _selectedKeys = [];
 
 	public event Action? DocumentChanged;

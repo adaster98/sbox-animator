@@ -171,6 +171,11 @@ public static class HostSkeletonBuilder
 	private static readonly Dictionary<(Guid DocumentId, bool Arms), CachedHostSkeleton>
 		SkeletonCache = [];
 
+	/// <summary>
+	/// Shared, cached host skeleton. The returned instance is handed to every caller, so treat it
+	/// as read-only — mutating it corrupts the viewport's live pose evaluation and every other
+	/// holder. Call <see cref="Build"/> when you need an instance you own.
+	/// </summary>
 	public static HostSkeleton BuildCached(
 		WeaponAnimationDocument document,
 		bool includeArmProfile = true )
@@ -362,6 +367,23 @@ public static class HostSkeletonBuilder
 			.ToList();
 	}
 
+	/// <summary>
+	/// Which arm profile <see cref="LoadArmProfile"/> would resolve to right now, or "" when none
+	/// is loadable. Used to keep the skeleton cache honest across load-order changes.
+	/// </summary>
+	private static string ResolvedArmProfileName()
+	{
+		try
+		{
+			var profile = LoadArmProfile();
+			return profile is null ? "" : profile.Name ?? ProductionArmsModel;
+		}
+		catch
+		{
+			return "";
+		}
+	}
+
 	public static Model? LoadArmProfile()
 	{
 		var production = Model.Load( ProductionArmsModel );
@@ -378,6 +400,10 @@ public static class HostSkeletonBuilder
 	{
 		var builder = new StringBuilder( 256 + document.Rig.Bones.Count * 128 );
 		builder.Append( includeArmProfile ).Append( '|' )
+			// The arm profile degrades production -> preview -> no arms at all. Without it in the
+			// signature, a skeleton built before the arms model was loadable stays cached, and the
+			// viewport silently keeps an armless rig until some document field happens to change.
+			.Append( includeArmProfile ? ResolvedArmProfileName() : "" ).Append( '|' )
 			.Append( document.Rig.SourceSkeletonRootId ).Append( '|' );
 		AppendTransform( builder, document.Calibration.PhysicalTransform );
 		AppendTransform( builder, document.Calibration.FramingTransform );

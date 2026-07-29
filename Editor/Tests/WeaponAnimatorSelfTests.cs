@@ -54,6 +54,7 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "timed constraints before IK", TestConstraintDrivenIk );
 		Run( report, "constraint maintained offset", TestConstraintMaintainedOffset );
 		Run( report, "history and key clipboard", TestControllerHistoryAndClipboard );
+		Run( report, "host skeleton cache invalidation", TestHostSkeletonCache );
 		Run( report, "calibration and generation validation", TestValidation );
 		Run( report, "generation output paths", TestGenerationOutputPaths );
 		Run( report, "material discovery and output", TestMaterialPipeline );
@@ -2329,6 +2330,56 @@ public static class WeaponAnimatorSelfTests
 
 		var pose = AnimationPoseEvaluator.Evaluate( document, skeleton, clip, 1 );
 		Near( report, new Vector3( 1.7f, 0, 0 ), pose.Model["hand_R"].Position, 0.002f, "Maintain-offset constraints must preserve the start-frame hand offset." );
+	}
+
+	private static void TestHostSkeletonCache( WeaponAnimatorSelfTestReport report )
+	{
+		HostSkeletonBuilder.ClearCache();
+		var document = ValidDocument();
+		var first = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		var second = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		Check(
+			report,
+			ReferenceEquals( first, second ),
+			"An unchanged document must reuse the cached host skeleton." );
+
+		// Calibration nudges can be far below display precision, so the signature must compare
+		// exact float bits rather than a rounded or formatted value.
+		document.Calibration.PhysicalTransform =
+			document.Calibration.PhysicalTransform.WithPosition(
+				new Vector3( 0.0000001f, 0, 0 ) );
+		var afterTinyMove = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		Check(
+			report,
+			!ReferenceEquals( first, afterTinyMove ),
+			"A sub-precision calibration change must still invalidate the cached skeleton." );
+
+		document.Rig.Bones[0].BindModelTransform =
+			document.Rig.Bones[0].BindModelTransform.WithScale( 1.0000001f );
+		var afterBoneChange = HostSkeletonBuilder.BuildCached(
+			document,
+			includeArmProfile: false );
+		Check(
+			report,
+			!ReferenceEquals( afterTinyMove, afterBoneChange ),
+			"A bone bind change must invalidate the cached skeleton." );
+
+		document.Binding.PrimaryHand.Transform =
+			document.Binding.PrimaryHand.Transform.WithPosition( new Vector3( 3, 2, 1 ) );
+		var afterBindingChange = HostSkeletonBuilder.BuildCached(
+			document,
+			includeArmProfile: false );
+		Check(
+			report,
+			!ReferenceEquals( afterBoneChange, afterBindingChange ),
+			"A hand binding change must invalidate the cached skeleton." );
+
+		var reread = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		Check(
+			report,
+			ReferenceEquals( afterBindingChange, reread ),
+			"Rebuilding after a change must repopulate the cache rather than rebuild every call." );
+		HostSkeletonBuilder.ClearCache();
 	}
 
 	private static void TestControllerHistoryAndClipboard( WeaponAnimatorSelfTestReport report )

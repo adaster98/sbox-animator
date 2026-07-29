@@ -152,7 +152,6 @@ public sealed class RigAuditPanel : Widget
 	private bool _showIgnored;
 
 	public event Action? ImportRequested;
-	public event Action? ResetTestPoseRequested;
 	public event Action? RigReviewConfirmed;
 
 	public RigAuditPanel( WeaponAnimatorController controller, Widget? parent = null ) : base( parent )
@@ -232,13 +231,6 @@ public sealed class RigAuditPanel : Widget
 			ConfirmWeaponBones,
 			this,
 			true ) );
-
-		var reset = WeaponAnimatorTheme.Button(
-			"Reset test pose",
-			"restart_alt",
-			() => ResetTestPoseRequested?.Invoke(),
-			this );
-		Layout.Add( reset );
 
 		_controller.DocumentChanged += Refresh;
 		_controller.SelectionChanged += RefreshBoneSelection;
@@ -588,7 +580,10 @@ public sealed class CalibrationInspectorPanel : Widget
 			FixedHeight = 28
 		};
 		_knownDistance.SetStyles( WeaponAnimatorTheme.InputStyle );
+		// EditingFinished fires on focus loss; ReturnPressed covers Enter explicitly so a typed
+		// distance is committed even where the blur signal does not reach us.
 		_knownDistance.EditingFinished += CommitScalePreview;
+		_knownDistance.ReturnPressed += CommitScalePreview;
 		knownRow.Layout.Add( _knownDistance, 1 );
 
 		var unitButton = new WeaponAnimatorButton( "in", knownRow )
