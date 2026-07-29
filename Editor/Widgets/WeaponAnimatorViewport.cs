@@ -237,6 +237,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private RealTimeSince _sinceCameraSpeedChanged = 99;
 
 	public ViewportPickMode PickMode { get; set; }
+
+	/// <summary>
+	/// Which custom anchor a <see cref="ViewportPickMode.CustomAnchor"/> pick will place.
+	/// </summary>
+	public Guid PickAnchorId { get; set; }
 	public bool IsPlaying => _controller.IsPlaying;
 	public WeaponAnimatorTransformMode TransformMode { get; private set; }
 	public Vector3 ModelDimensions => _sourceRenderer?.Model?.Bounds.Size ?? Vector3.Zero;
@@ -598,9 +603,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			_ => "Move"
 		};
 
-	public void SetPickMode( ViewportPickMode mode )
+	public void SetPickMode( ViewportPickMode mode, Guid anchorId = default )
 	{
 		PickMode = mode;
+		PickAnchorId = anchorId;
 		StatusChanged?.Invoke( mode == ViewportPickMode.None
 			? "Pick mode cleared."
 			: $"Click the weapon surface or a bone to set {PickLabel( mode )}." );
@@ -1051,8 +1057,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 		// Calibration only ever poses the weapon as a whole, plus its anchors. Selecting a bone
 		// no longer suppresses the rig gizmo, which previously left the page with no gizmo at all.
-		if ( CalibrationSelection.TryGetAnchor( document.Workspace.SelectedControl, out var anchorKind )
-			&& document.Calibration.GetAnchor( anchorKind ) is { } anchor )
+		if ( CalibrationSelection.Resolve( document, document.Workspace.SelectedControl ) is { } anchor )
 			DrawSelectedAnchorControl( anchor );
 		else
 			DrawWholeRigControl();
@@ -1688,7 +1693,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 						* startLocal.Rotation).Normal;
 				_controller.UpdateContinuousEdit( document =>
 				{
-					var selected = document.Calibration.GetAnchor( anchor.Kind );
+					var selected = document.Calibration.FindAnchor( anchor.Id );
 					if ( selected is null )
 						return;
 					selected.LocalRotation = rotation;
@@ -1712,7 +1717,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			var local = sourceTransform.PointToLocal( world );
 			_controller.UpdateContinuousEdit( document =>
 			{
-				var selected = document.Calibration.GetAnchor( anchor.Kind );
+				var selected = document.Calibration.FindAnchor( anchor.Id );
 				if ( selected is null )
 					return;
 				selected.LocalPosition = local;
@@ -2064,19 +2069,20 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			Gizmo.Draw.LineThickness = 1.5f;
 			Gizmo.Draw.Line( world, leaderEnd );
 			Gizmo.Draw.ScreenText(
-				$"[{AnchorCode( anchor.Kind )}] {CalibrationSelection.DisplayName( anchor.Kind ).ToUpperInvariant()}",
+				$"[{AnchorCode( anchor.Kind )}] {CalibrationSelection.DisplayName( anchor ).ToUpperInvariant()}",
 				leaderEnd,
 				new Vector2( 6, -6 ),
 				size: 11 );
+			var token = CalibrationSelection.Anchor( anchor );
 			using var scope = Gizmo.Scope(
-				$"anchor:{anchor.Kind}",
+				$"anchor:{anchor.Id:N}",
 				new Transform( world, transform.Rotation * anchor.LocalRotation ) );
-			var selected = _controller.Document.Workspace.SelectedControl == CalibrationSelection.Anchor( anchor.Kind );
+			var selected = _controller.Document.Workspace.SelectedControl == token;
 			Gizmo.Draw.Color = selected ? Color.White : color;
 			Gizmo.Draw.SolidSphere( Vector3.Zero, selected ? 0.24f : 0.18f, 8, 6 );
 			Gizmo.Hitbox.Sphere( new Sphere( Vector3.Zero, 0.32f ) );
 			if ( Gizmo.IsHovered && Gizmo.WasLeftMousePressed )
-				_controller.SelectControl( CalibrationSelection.Anchor( anchor.Kind ) );
+				_controller.SelectControl( token );
 		}
 
 		var rear = _controller.Document.Calibration.GetAnchor( AnchorKind.RearBore );
@@ -2230,7 +2236,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private void ApplyPickedPoint( Vector3 localPosition )
 	{
 		var mode = PickMode;
+		var anchorId = PickAnchorId;
 		PickMode = ViewportPickMode.None;
+		PickAnchorId = default;
+		var token = "";
 		_controller.Mutate( $"Set {PickLabel( mode )}", document =>
 		{
 			var measurement = document.Calibration.Measurement;
@@ -2244,6 +2253,15 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					measurement.SecondPoint = localPosition;
 					measurement.HasSecondPoint = true;
 					break;
+				case ViewportPickMode.CustomAnchor:
+					// Placing an existing custom anchor must not disturb its stored attachment name.
+					if ( document.Calibration.FindAnchor( anchorId ) is not { } custom )
+						break;
+					custom.BoneName = document.Workspace.SelectedBone;
+					custom.LocalPosition = localPosition;
+					document.Calibration.Confirmed = false;
+					token = CalibrationSelection.Anchor( custom );
+					break;
 				default:
 					var kind = PickAnchorKind( mode );
 					document.Calibration.SetAnchor( new WeaponAnchor
@@ -2254,14 +2272,12 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 						LocalPosition = localPosition
 					} );
 					document.Calibration.Confirmed = false;
+					token = CalibrationSelection.Anchor( kind );
 					break;
 			}
 		} );
-		if ( mode is not ViewportPickMode.MeasurementFirst
-			and not ViewportPickMode.MeasurementSecond )
-		{
-			_controller.SelectControl( CalibrationSelection.Anchor( PickAnchorKind( mode ) ) );
-		}
+		if ( !string.IsNullOrEmpty( token ) )
+			_controller.SelectControl( token );
 		StatusChanged?.Invoke( $"{PickLabel( mode )} set at {localPosition}." );
 	}
 
@@ -2284,6 +2300,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		ViewportPickMode.FrontBoreAnchor => "alignment marker — front",
 		ViewportPickMode.MuzzleAnchor => "muzzle",
 		ViewportPickMode.EjectAnchor => "eject",
+		ViewportPickMode.CustomAnchor => "custom anchor",
 		_ => "point"
 	};
 

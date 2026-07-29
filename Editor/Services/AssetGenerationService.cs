@@ -966,12 +966,7 @@ public sealed class AssetGenerationService
 			var anchorModelPosition = placement.PointToWorld( anchor.LocalPosition );
 			var anchorModelRotation = placement.Rotation * anchor.LocalRotation;
 			yield return new HostAttachment(
-				anchor.Kind switch
-				{
-					AnchorKind.Muzzle => "muzzle",
-					AnchorKind.Eject => "eject",
-					_ => WeaponAnimationDocument.Slugify( anchor.Name )
-				},
+				WeaponAnimationNames.AttachmentName( anchor ),
 				parentName,
 				compiledParent.PointToLocal( anchorModelPosition ),
 				compiledParent.Rotation.Inverse * anchorModelRotation );

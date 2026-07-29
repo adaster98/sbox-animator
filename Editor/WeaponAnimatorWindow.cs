@@ -70,14 +70,15 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	{
 		_asset = asset;
 		_resource = asset?.LoadResource<WeaponAnimationAsset>() ?? new WeaponAnimationAsset();
-		var document = _resource.Document ?? WeaponAnimationDocument.CreateDefault( asset?.Name ?? "New Weapon" );
+		var document = _resource.Document ?? WeaponAnimationDocument.CreateDefault();
+		var adoptedName = AdoptAssetFileName( document, asset );
 		_migration = MigrateAndRepair( document );
 		var sourceRecovered = WeaponSourceImporter.TryRecoverMissingPreviewModel(
 			document,
 			out var sourceRecoveryMessage );
 		_migrationBackupRequired = _migration.Changed;
 		_controller.SetDocument( document );
-		if ( _migration.Changed || sourceRecovered )
+		if ( _migration.Changed || sourceRecovered || adoptedName )
 			_controller.ReplaceWithoutHistory( document, true );
 
 		if ( document.ActiveStage == WeaponAnimatorStage.Animate
@@ -358,7 +359,6 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		var inspector = new SelectedControlInspectorPanel( _controller );
 		var clips = new ClipRackPanel(
 			_controller,
-			clipsOnly: true,
 			showClipHeader: false );
 		var timeline = new AnimationTimelinePanel( _controller );
 		clips.StatusChanged += ( message, severity ) => _statusPanel?.SetMessage( message, severity );
@@ -904,6 +904,8 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		}
 
 		_asset = asset;
+		// Saving under a new filename renames the project, so the generated output follows it.
+		AdoptAssetFileName( _controller.Document, _asset );
 		_resource = new WeaponAnimationAsset { Document = _controller.Document };
 		if ( !_asset.SaveToDisk( _resource ) )
 		{
@@ -1159,6 +1161,42 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		{
 			_recoveryWritePending = false;
 		}
+	}
+
+	/// <summary>
+	/// The .wepanim filename is the project's identity: generated folders and asset names follow it.
+	/// This has to run on every open rather than only for new documents, because
+	/// <c>WeaponAnimationAsset.Document</c> is initialised with <c>CreateDefault()</c> — it is never
+	/// null, so an asset created outside the New Project flow always arrives carrying the
+	/// "New Weapon" default and would otherwise generate into <c>weapons/new_weapon</c>.
+	/// </summary>
+	internal static bool AdoptAssetFileName( WeaponAnimationDocument document, Asset? asset ) =>
+		AdoptAssetFileName( document, asset?.Path );
+
+	internal static bool AdoptAssetFileName( WeaponAnimationDocument document, string? assetPath )
+	{
+		if ( string.IsNullOrWhiteSpace( assetPath ) )
+			return false;
+
+		var fileName = Path.GetFileNameWithoutExtension( assetPath.Replace( '\\', '/' ) );
+		var slug = WeaponAnimationDocument.Slugify( fileName );
+		if ( string.IsNullOrWhiteSpace( slug ) )
+			return false;
+
+		var changed = false;
+		if ( document.Name != fileName )
+		{
+			document.Name = fileName;
+			changed = true;
+		}
+
+		document.Output ??= new OutputSettings();
+		if ( document.Output.AssetName != slug )
+		{
+			document.Output.AssetName = slug;
+			changed = true;
+		}
+		return changed;
 	}
 
 	private void RefreshTitle()

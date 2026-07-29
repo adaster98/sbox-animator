@@ -14,11 +14,9 @@ public sealed class ClipRackPanel : Widget
 	private readonly WeaponAnimatorController _controller;
 	private readonly ScrollArea _clipScroll;
 	private readonly Widget _clipCanvas;
-	private readonly ScrollArea? _propertiesScroll;
-	private readonly Widget? _rigCanvas;
-	private readonly Widget? _propertiesCanvas;
+	private readonly ScrollArea _propertiesScroll;
+	private readonly Widget _propertiesCanvas;
 	private readonly Label _actionHint;
-	private readonly bool _clipsOnly;
 	private readonly Dictionary<Guid, WeaponAnimatorButton> _clipButtons = [];
 	private readonly Dictionary<Guid, int> _propertyScrollByClip = [];
 	private string _clipListSignature = "";
@@ -29,23 +27,18 @@ public sealed class ClipRackPanel : Widget
 	public ClipRackPanel(
 		WeaponAnimatorController controller,
 		Widget? parent = null,
-		bool clipsOnly = false,
 		bool showClipHeader = true ) : base( parent )
 	{
 		_controller = controller;
-		_clipsOnly = clipsOnly;
 		Layout = Layout.Column();
 		Layout.Margin = new Sandbox.UI.Margin( 8 );
 		Layout.Spacing = 6;
-
-		if ( !_clipsOnly )
-			Layout.Add( BuildChecklist() );
 
 		if ( showClipHeader )
 			Layout.Add( Header( "CLIP RACK", this ) );
 		_clipScroll = new ScrollArea( this )
 		{
-			MinimumSize = new Vector2( 200, clipsOnly ? 70 : 160 )
+			MinimumSize = new Vector2( 200, 70 )
 		};
 		_clipCanvas = new Widget( _clipScroll );
 		_clipCanvas.Layout = Layout.Column();
@@ -77,27 +70,13 @@ public sealed class ClipRackPanel : Widget
 		_actionHint.WordWrap = true;
 		Layout.Add( _actionHint );
 
-		if ( !_clipsOnly )
-		{
-			Layout.Add( Header( "RIG TREE", this ) );
-			var rigScroll = new ScrollArea( this ) { MinimumSize = new Vector2( 200, 120 ) };
-			_rigCanvas = new Widget( rigScroll );
-			_rigCanvas.Layout = Layout.Column();
-			_rigCanvas.Layout.Margin = WeaponAnimatorTheme.ScrollCanvasMargin();
-			_rigCanvas.Layout.Spacing = 1;
-			rigScroll.Canvas = _rigCanvas;
-			Layout.Add( rigScroll, 1 );
-		}
-		else
-		{
-			_propertiesScroll = new ScrollArea( this ) { MinimumHeight = 80 };
-			_propertiesCanvas = new Widget( _propertiesScroll );
-			_propertiesCanvas.Layout = Layout.Column();
-			_propertiesCanvas.Layout.Margin = WeaponAnimatorTheme.ScrollCanvasMargin();
-			_propertiesCanvas.Layout.Spacing = 4;
-			_propertiesScroll.Canvas = _propertiesCanvas;
-			Layout.Add( _propertiesScroll, 1 );
-		}
+		_propertiesScroll = new ScrollArea( this ) { MinimumHeight = 80 };
+		_propertiesCanvas = new Widget( _propertiesScroll );
+		_propertiesCanvas.Layout = Layout.Column();
+		_propertiesCanvas.Layout.Margin = WeaponAnimatorTheme.ScrollCanvasMargin();
+		_propertiesCanvas.Layout.Spacing = 4;
+		_propertiesScroll.Canvas = _propertiesCanvas;
+		Layout.Add( _propertiesScroll, 1 );
 
 		var addCustom = WeaponAnimatorTheme.Button(
 			"Add custom clip",
@@ -107,8 +86,6 @@ public sealed class ClipRackPanel : Widget
 		Layout.Add( addCustom );
 
 		_controller.DocumentChanged += Rebuild;
-		if ( !_clipsOnly )
-			_controller.SelectionChanged += Rebuild;
 		Rebuild();
 	}
 
@@ -117,62 +94,6 @@ public sealed class ClipRackPanel : Widget
 		_controller.DocumentChanged -= Rebuild;
 		_controller.SelectionChanged -= Rebuild;
 		base.OnDestroyed();
-	}
-
-	private Widget BuildChecklist()
-	{
-		var widget = new Widget( this );
-		widget.SetStyles(
-			"background-color: rgba(21,127,150,0.12);" +
-			"border: 1px solid rgba(55,198,226,0.24);" +
-			"border-radius: 3px;" );
-		widget.Layout = Layout.Column();
-		widget.Layout.Margin = new Sandbox.UI.Margin( 8 );
-		widget.Layout.Spacing = 3;
-		widget.Visible = !_controller.Document.Binding.ChecklistDismissed;
-
-		var title = WeaponAnimatorTheme.SectionLabel(
-			"FIRST GRIP CHECKLIST",
-			widget,
-			WeaponAnimatorTheme.Cyan );
-		widget.Layout.Add( title );
-
-		var items = new[]
-		{
-			("1  Bind primary hand", "@primary_hand"),
-			("2  Bind support hand", "@support_hand"),
-			("3  Elbow poles", "@primary_elbow"),
-			("4  Pose fingers around grips", "finger_index_0_R"),
-			("5  Save default grip pose", "")
-		};
-		foreach ( var item in items )
-		{
-			var button = new WeaponAnimatorButton( item.Item1, widget )
-			{
-				Clicked = () =>
-				{
-					if ( !string.IsNullOrWhiteSpace( item.Item2 ) )
-					{
-						if ( item.Item2.StartsWith( "@" ) )
-							_controller.SelectControl( item.Item2 );
-						else
-							_controller.SelectBone( item.Item2 );
-					}
-				},
-				Tint = WeaponAnimatorTheme.Surface
-			};
-			widget.Layout.Add( button );
-		}
-		widget.Layout.Add( WeaponAnimatorTheme.Button(
-			"Dismiss checklist",
-			"close",
-			() =>
-			{
-				_controller.Mutate( "Dismiss binding checklist", d => d.Binding.ChecklistDismissed = true );
-				widget.Visible = false;
-			},
-			widget ) );
-		return widget;
 	}
 
 	private void Rebuild()
@@ -224,47 +145,7 @@ public sealed class ClipRackPanel : Widget
 			RefreshClipButtons();
 		}
 
-		_rigCanvas?.Layout.Clear( true );
-		_propertiesCanvas?.Layout.Clear( true );
-
-		if ( _rigCanvas is not null )
-		{
-			var controls = new[]
-			{
-				("@primary_hand",
-					$"Primary hand · {(_controller.Document.Binding.PrimaryHand.IsBound ? "bound" : "unbound")}",
-					WeaponAnimatorTheme.Cyan),
-				("@support_hand",
-					$"Support hand · {(_controller.Document.Binding.SupportHand.IsBound ? "bound" : "unbound")}",
-					WeaponAnimatorTheme.Cyan),
-				("@primary_elbow", "Primary elbow", WeaponAnimatorTheme.Cyan),
-				("@support_elbow", "Support elbow", WeaponAnimatorTheme.Cyan)
-			};
-			foreach ( var control in controls )
-			{
-				var button = new WeaponAnimatorButton( control.Item2, _rigCanvas )
-				{
-					Clicked = () => _controller.SelectControl( control.Item1 ),
-					Tint = _controller.Document.Workspace.SelectedControl == control.Item1
-						? control.Item3 * 0.5f
-						: WeaponAnimatorTheme.Surface
-				};
-				_rigCanvas.Layout.Add( button );
-			}
-
-			foreach ( var bone in HostSkeletonBuilder.BuildCached( _controller.Document ).Bones )
-			{
-				var button = new WeaponAnimatorButton( bone.Name, _rigCanvas )
-				{
-					Clicked = () => _controller.SelectBone( bone.Name ),
-					Tint = _controller.Document.Workspace.SelectedBone == bone.Name
-						? (bone.IsWeaponBone ? WeaponAnimatorTheme.Amber : WeaponAnimatorTheme.Cyan) * 0.45f
-						: WeaponAnimatorTheme.Surface
-				};
-				_rigCanvas.Layout.Add( button );
-			}
-			_rigCanvas.Layout.AddStretchCell();
-		}
+		_propertiesCanvas.Layout.Clear( true );
 
 		var selected = _controller.Document.GetSelectedClip();
 		_actionHint.Text = selected is null
@@ -272,13 +153,9 @@ public sealed class ClipRackPanel : Widget
 			: selected.Readiness == ClipReadiness.NotStarted
 				? "Not started · choose Start, Duplicate, or Import."
 				: $"{selected.Readiness} · {selected.Duration:0.###} s at {selected.SampleRate:0.#} fps";
-		if ( _propertiesCanvas is not null )
-		{
-			BuildClipProperties( selected );
-			_propertiesCanvas.UpdateGeometry();
-			if ( _propertiesScroll is not null )
-				_propertiesScroll.VerticalScrollbar.Value = propertiesScroll;
-		}
+		BuildClipProperties( selected );
+		_propertiesCanvas.UpdateGeometry();
+		_propertiesScroll.VerticalScrollbar.Value = propertiesScroll;
 		_lastSelectedClipId = selectedClipId;
 	}
 
@@ -1508,339 +1385,6 @@ internal sealed class TimelineControlToolbar : Widget
 		section.Layout.Spacing = 4;
 		return section;
 	}
-}
-
-internal sealed class TimelineCanvas : Widget
-{
-	private const float TrackHeaderWidth = 170;
-	private const float RulerHeight = 24;
-	private const float TrackHeight = 22;
-	private readonly WeaponAnimatorController _controller;
-	private Vector2 _pressPosition;
-	private Dictionary<Guid, float>? _dragStartTimes;
-
-	public TimelineCanvas( WeaponAnimatorController controller, Widget? parent = null ) : base( parent )
-	{
-		_controller = controller;
-		MinimumSize = new Vector2( 320, 120 );
-		MouseTracking = true;
-		SetStyles( "background-color: rgb(12,14,16); border: none;" );
-		_controller.DocumentChanged += Update;
-		_controller.KeySelectionChanged += Update;
-		_controller.TimelineChanged += Update;
-	}
-
-	public override void OnDestroyed()
-	{
-		_controller.DocumentChanged -= Update;
-		_controller.KeySelectionChanged -= Update;
-		_controller.TimelineChanged -= Update;
-		base.OnDestroyed();
-	}
-
-	protected override void OnPaint()
-	{
-		var clip = _controller.Document.GetSelectedClip();
-		Paint.SetBrushAndPen( WeaponAnimatorTheme.Background );
-		Paint.DrawRect( LocalRect );
-		if ( clip is null )
-			return;
-
-		var bodyWidth = MathF.Max( Width - TrackHeaderWidth, 1 );
-		Paint.SetPen( WeaponAnimatorTheme.Border );
-		Paint.DrawLine( new Vector2( TrackHeaderWidth, 0 ), new Vector2( TrackHeaderWidth, Height ) );
-
-		var totalFrames = Math.Max( 1, (int)MathF.Round( clip.Duration * clip.SampleRate ) );
-		var frameStep = totalFrames > 120 ? 10 : totalFrames > 60 ? 5 : 1;
-		for ( var frame = 0; frame <= totalFrames; frame += frameStep )
-		{
-			var time = frame / clip.SampleRate;
-			var x = TimeToX( time, clip.Duration );
-			Paint.SetPen( Color.White.WithAlpha( frame % (frameStep * 5) == 0 ? 0.12f : 0.05f ) );
-			Paint.DrawLine( new Vector2( x, RulerHeight ), new Vector2( x, Height ) );
-			if ( frame % (frameStep * 5) == 0 )
-			{
-				Paint.SetPen( WeaponAnimatorTheme.Muted );
-				Paint.DrawText(
-					new Rect( x + 3, 0, 42, RulerHeight ),
-					frame.ToString(),
-					TextFlag.LeftCenter );
-			}
-		}
-
-		if ( _controller.Document.Workspace.CurveEditorVisible )
-			DrawCurves( clip );
-		else
-			DrawDopeSheet( clip );
-
-		var playheadX = TimeToX(
-			_controller.Document.Workspace.TimelineTime,
-			clip.Duration );
-		Paint.SetPen( WeaponAnimatorTheme.Coral, 1.5f );
-		Paint.DrawLine( new Vector2( playheadX, 0 ), new Vector2( playheadX, Height ) );
-		Paint.SetBrushAndPen( WeaponAnimatorTheme.Coral );
-		Paint.DrawRect( new Rect( playheadX - 3, 0, 6, 8 ), 1 );
-	}
-
-	protected override void OnMousePress( MouseEvent e )
-	{
-		base.OnMousePress( e );
-		if ( !e.LeftMouseButton )
-			return;
-		_pressPosition = e.LocalPosition;
-		var clip = _controller.Document.GetSelectedClip();
-		if ( clip is null || e.LocalPosition.x < TrackHeaderWidth )
-			return;
-
-		var hit = HitKey( clip, e.LocalPosition );
-		if ( hit is not null )
-		{
-			_controller.SelectKeys( [hit.Value], e.HasCtrl || e.HasShift );
-			_dragStartTimes = clip.Tracks.SelectMany( x => x.Keys )
-				.Select( x => (x.Id, x.Time) )
-				.Concat( clip.VisibilityTracks.SelectMany( x => x.Keys )
-					.Select( x => (x.Id, x.Time) ) )
-				.Where( x => _controller.SelectedKeys.Contains( x.Id ) )
-				.ToDictionary( x => x.Id, x => x.Time );
-		}
-		else
-		{
-			_controller.SelectKeys( [], false );
-			_controller.SetTimelineTime( XToTime( e.LocalPosition.x, clip.Duration ) );
-		}
-	}
-
-	protected override void OnMouseMove( MouseEvent e )
-	{
-		base.OnMouseMove( e );
-		if ( (e.ButtonState & MouseButtons.Left) == 0 || _dragStartTimes is null )
-			return;
-		Update();
-	}
-
-	protected override void OnMouseReleased( MouseEvent e )
-	{
-		base.OnMouseReleased( e );
-		if ( _dragStartTimes is null || !e.LeftMouseButton )
-			return;
-		var clip = _controller.Document.GetSelectedClip();
-		if ( clip is null )
-		{
-			_dragStartTimes = null;
-			return;
-		}
-
-		var delta = XToTime( e.LocalPosition.x, clip.Duration )
-			- XToTime( _pressPosition.x, clip.Duration );
-		var starts = _dragStartTimes;
-		_dragStartTimes = null;
-		if ( MathF.Abs( delta ) < 0.00001f )
-			return;
-
-		_controller.Mutate( "Move keys", _ =>
-		{
-			foreach ( var key in clip.Tracks.SelectMany( x => x.Keys ) )
-			{
-				if ( !starts.TryGetValue( key.Id, out var start ) )
-					continue;
-				key.Time = TimelineInteraction.SnapTime( clip, start + delta );
-			}
-			foreach ( var key in clip.VisibilityTracks.SelectMany( x => x.Keys ) )
-			{
-				if ( !starts.TryGetValue( key.Id, out var start ) )
-					continue;
-				key.Time = TimelineInteraction.SnapTime( clip, start + delta );
-			}
-			foreach ( var track in clip.Tracks )
-				track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
-			foreach ( var track in clip.VisibilityTracks )
-				track.Keys.Sort( ( a, b ) => a.Time.CompareTo( b.Time ) );
-		} );
-	}
-
-	private void DrawDopeSheet( WeaponAnimationClip clip )
-	{
-		var capacity = Math.Max( 1, (int)((Height - RulerHeight) / TrackHeight) - 1 );
-		var parts = _controller.Document.Rig.VisibilityParts.Take( capacity ).ToArray();
-		for ( var i = 0; i < parts.Length; i++ )
-			DrawVisibilityRow( clip, parts[i], i );
-
-		var tracks = clip.Tracks.Take( Math.Max( 0, capacity - parts.Length ) ).ToArray();
-		for ( var i = 0; i < tracks.Length; i++ )
-		{
-			var track = tracks[i];
-			var y = RulerHeight + (parts.Length + i) * TrackHeight;
-			Paint.SetBrushAndPen( i % 2 == 0
-				? Color.White.WithAlpha( 0.018f )
-				: Color.Transparent );
-			Paint.DrawRect( new Rect( 0, y, Width, TrackHeight ) );
-			Paint.SetPen( track.Kind == RigControlKind.Weapon
-				? WeaponAnimatorTheme.Amber
-				: WeaponAnimatorTheme.Cyan );
-			Paint.DrawText( new Rect( 8, y, TrackHeaderWidth - 12, TrackHeight ), track.Target, TextFlag.LeftCenter );
-
-			foreach ( var key in track.Keys )
-			{
-				var x = TimeToX( key.Time, clip.Duration );
-				var selected = _controller.SelectedKeys.Contains( key.Id );
-				Paint.SetBrushAndPen( selected ? Color.White : TrackColor( track.Kind ) );
-				var diamond = new[]
-				{
-					new Vector2( x, y + 5 ),
-					new Vector2( x + 5, y + TrackHeight * 0.5f ),
-					new Vector2( x, y + TrackHeight - 5 ),
-					new Vector2( x - 5, y + TrackHeight * 0.5f )
-				};
-				Paint.DrawPolygon( diamond );
-			}
-		}
-
-		var tagY = RulerHeight + (parts.Length + tracks.Length) * TrackHeight;
-		Paint.SetPen( WeaponAnimatorTheme.Muted );
-		Paint.DrawText( new Rect( 8, tagY, TrackHeaderWidth - 12, TrackHeight ), "TAGS", TextFlag.LeftCenter );
-		foreach ( var tag in clip.Tags )
-		{
-			var start = TimeToX( tag.StartTime, clip.Duration );
-			var end = TimeToX( tag.EndTime, clip.Duration );
-			Paint.SetBrushAndPen( WeaponAnimatorTheme.Green.WithAlpha( 0.65f ) );
-			if ( tag.Kind == AnimationTagKind.Point )
-				Paint.DrawRect( new Rect( start - 2, tagY + 4, 4, TrackHeight - 8 ), 1 );
-			else
-				Paint.DrawRect( new Rect( start, tagY + 5, MathF.Max( end - start, 4 ), TrackHeight - 10 ), 2 );
-		}
-	}
-
-	private void DrawVisibilityRow(
-		WeaponAnimationClip clip,
-		WeaponVisibilityPart part,
-		int index )
-	{
-		var y = RulerHeight + index * TrackHeight;
-		Paint.SetBrushAndPen( index % 2 == 0
-			? Color.White.WithAlpha( 0.018f )
-			: Color.Transparent );
-		Paint.DrawRect( new Rect( 0, y, Width, TrackHeight ) );
-		Paint.SetPen( WeaponAnimatorTheme.Amber );
-		Paint.DrawText(
-			new Rect( 8, y, TrackHeaderWidth - 12, TrackHeight ),
-			$"◉  {part.Name}",
-			TextFlag.LeftCenter );
-
-		foreach ( var span in WeaponVisibilityEvaluator.BuildSpans( part, clip ) )
-		{
-			var start = TimeToX( span.StartTime, clip.Duration );
-			var end = TimeToX( span.EndTime, clip.Duration );
-			var color = span.Visible
-				? WeaponAnimatorTheme.Green
-				: WeaponAnimatorTheme.Coral;
-			Paint.SetBrushAndPen( color.WithAlpha( span.Visible ? 0.28f : 0.24f ) );
-			Paint.DrawRect(
-				new Rect(
-					start,
-					y + 4,
-					MathF.Max( end - start, 1 ),
-					TrackHeight - 8 ),
-				2 );
-		}
-
-		var track = clip.VisibilityTracks.FirstOrDefault( x => x.PartId == part.Id );
-		if ( track is null )
-			return;
-		foreach ( var key in track.Keys )
-		{
-			var x = TimeToX( key.Time, clip.Duration );
-			var selected = _controller.SelectedKeys.Contains( key.Id );
-			Paint.SetBrushAndPen( selected
-				? Color.White
-				: key.Visible
-					? WeaponAnimatorTheme.Green
-					: WeaponAnimatorTheme.Coral );
-			var diamond = new[]
-			{
-				new Vector2( x, y + 5 ),
-				new Vector2( x + 5, y + TrackHeight * 0.5f ),
-				new Vector2( x, y + TrackHeight - 5 ),
-				new Vector2( x - 5, y + TrackHeight * 0.5f )
-			};
-			Paint.DrawPolygon( diamond );
-		}
-	}
-
-	private void DrawCurves( WeaponAnimationClip clip )
-	{
-		var tracks = clip.Tracks.Where( x => x.Keys.Count > 0 ).Take( 3 ).ToArray();
-		if ( tracks.Length == 0 )
-			return;
-		var graph = new Rect( TrackHeaderWidth, RulerHeight, Width - TrackHeaderWidth, Height - RulerHeight );
-		var values = tracks.SelectMany( x => x.Keys ).SelectMany( x =>
-			new[] { x.Position.x, x.Position.y, x.Position.z } ).ToArray();
-		var minimum = values.DefaultIfEmpty( -1 ).Min();
-		var maximum = values.DefaultIfEmpty( 1 ).Max();
-		if ( MathF.Abs( maximum - minimum ) < 0.001f )
-		{
-			minimum -= 1;
-			maximum += 1;
-		}
-
-		for ( var index = 0; index < tracks.Length; index++ )
-		{
-			var track = tracks[index];
-			Paint.SetPen( TrackColor( track.Kind ), 1.5f );
-			Paint.DrawText(
-				new Rect( 8, RulerHeight + index * 20, TrackHeaderWidth - 12, 20 ),
-				track.Target,
-				TextFlag.LeftCenter );
-			Vector2? previous = null;
-			foreach ( var key in track.Keys.OrderBy( x => x.Time ) )
-			{
-				var point = new Vector2(
-					TimeToX( key.Time, clip.Duration ),
-					graph.Bottom - (key.Position.x - minimum) / (maximum - minimum) * graph.Height );
-				if ( previous is not null )
-					Paint.DrawLine( previous.Value, point );
-				Paint.DrawCircle( point, 3 );
-				previous = point;
-			}
-		}
-	}
-
-	private Guid? HitKey( WeaponAnimationClip clip, Vector2 position )
-	{
-		var trackIndex = (int)((position.y - RulerHeight) / TrackHeight);
-		if ( trackIndex < 0 )
-			return null;
-
-		var parts = _controller.Document.Rig.VisibilityParts;
-		if ( trackIndex < parts.Count )
-		{
-			var track = clip.VisibilityTracks.FirstOrDefault( x =>
-				x.PartId == parts[trackIndex].Id );
-			return track?.Keys.FirstOrDefault( x =>
-				MathF.Abs( TimeToX( x.Time, clip.Duration ) - position.x ) <= 8 )?.Id;
-		}
-
-		var transformIndex = trackIndex - parts.Count;
-		if ( transformIndex >= clip.Tracks.Count )
-			return null;
-		return clip.Tracks[transformIndex].Keys.FirstOrDefault( x =>
-			MathF.Abs( TimeToX( x.Time, clip.Duration ) - position.x ) <= 8 )?.Id;
-	}
-
-	private float TimeToX( float time, float duration ) =>
-		TrackHeaderWidth + time / MathF.Max( duration, 0.0001f ) * MathF.Max( Width - TrackHeaderWidth, 1 );
-
-	private float XToTime( float x, float duration ) =>
-		Math.Clamp(
-			(x - TrackHeaderWidth) / MathF.Max( Width - TrackHeaderWidth, 1 ) * duration,
-			0,
-			duration );
-
-	private static Color TrackColor( RigControlKind kind ) => kind switch
-	{
-		RigControlKind.Weapon => WeaponAnimatorTheme.Amber,
-		RigControlKind.Camera => WeaponAnimatorTheme.Green,
-		_ => WeaponAnimatorTheme.Cyan
-	};
 }
 
 internal static class ClipExtensions

@@ -74,12 +74,7 @@ public static class PrefabWriter
 			.OrderBy( anchor => anchor.Kind )
 			.ThenBy( anchor => anchor.Name, StringComparer.OrdinalIgnoreCase ) )
 		{
-			var name = anchor.Kind switch
-			{
-				AnchorKind.Muzzle => "muzzle",
-				AnchorKind.Eject => "eject",
-				_ => WeaponAnimationDocument.Slugify( anchor.Name )
-			};
+			var name = WeaponAnimationNames.AttachmentName( anchor );
 			if ( string.IsNullOrWhiteSpace( name ) )
 				continue;
 

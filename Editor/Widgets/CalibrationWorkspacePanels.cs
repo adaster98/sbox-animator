@@ -19,7 +19,8 @@ public enum ViewportPickMode
 	RearBoreAnchor,
 	FrontBoreAnchor,
 	MuzzleAnchor,
-	EjectAnchor
+	EjectAnchor,
+	CustomAnchor
 }
 
 public static class CalibrationSelection
@@ -27,6 +28,14 @@ public static class CalibrationSelection
 	private const string AnchorPrefix = "@anchor:";
 
 	public static string Anchor( AnchorKind kind ) => $"{AnchorPrefix}{kind}";
+
+	/// <summary>
+	/// Custom anchors carry their id in the token, because a weapon may hold several of them.
+	/// </summary>
+	public static string Anchor( WeaponAnchor anchor ) =>
+		anchor.Kind == AnchorKind.Custom
+			? $"{AnchorPrefix}{AnchorKind.Custom}:{anchor.Id:N}"
+			: Anchor( anchor.Kind );
 
 	public static string DisplayName( AnchorKind kind ) => kind switch
 	{
@@ -38,12 +47,41 @@ public static class CalibrationSelection
 		_ => "Custom anchor"
 	};
 
+	public static string DisplayName( WeaponAnchor anchor ) =>
+		anchor.Kind == AnchorKind.Custom && !string.IsNullOrWhiteSpace( anchor.Name )
+			? anchor.Name
+			: DisplayName( anchor.Kind );
+
 	public static bool TryGetAnchor( string control, out AnchorKind kind )
 	{
 		kind = default;
-		return control.StartsWith( AnchorPrefix, StringComparison.Ordinal )
-			&& Enum.TryParse( control[AnchorPrefix.Length..], out kind );
+		if ( !control.StartsWith( AnchorPrefix, StringComparison.Ordinal ) )
+			return false;
+		var body = control[AnchorPrefix.Length..];
+		var separator = body.IndexOf( ':' );
+		return Enum.TryParse( separator >= 0 ? body[..separator] : body, out kind );
 	}
+
+	public static bool TryGetCustomAnchorId( string control, out Guid id )
+	{
+		id = Guid.Empty;
+		if ( !control.StartsWith( AnchorPrefix, StringComparison.Ordinal ) )
+			return false;
+		var body = control[AnchorPrefix.Length..];
+		var separator = body.IndexOf( ':' );
+		return separator >= 0
+			&& Guid.TryParseExact( body[(separator + 1)..], "N", out id );
+	}
+
+	/// <summary>
+	/// Resolves a selection token to its anchor, by id for custom anchors and by kind otherwise.
+	/// </summary>
+	public static WeaponAnchor? Resolve( WeaponAnimationDocument document, string control ) =>
+		TryGetCustomAnchorId( control, out var id )
+			? document.Calibration.FindAnchor( id )
+			: TryGetAnchor( control, out var kind )
+				? document.Calibration.GetAnchor( kind )
+				: null;
 }
 
 internal sealed class ScrubHandle : Widget
@@ -138,6 +176,7 @@ internal sealed class ScrubHandle : Widget
 public sealed class RigAuditPanel : Widget
 {
 	private readonly WeaponAnimatorController _controller;
+	private readonly ScrollArea _boneScroll;
 	private readonly Widget _boneCanvas;
 	private readonly LineEdit _search;
 	private readonly Label _sourceStatus;
@@ -217,13 +256,13 @@ public sealed class RigAuditPanel : Widget
 			branchActions ) );
 		Layout.Add( branchActions );
 
-		var scroll = new ScrollArea( this );
-		_boneCanvas = new Widget( scroll );
+		_boneScroll = new ScrollArea( this );
+		_boneCanvas = new Widget( _boneScroll );
 		_boneCanvas.Layout = Layout.Column();
 		_boneCanvas.Layout.Margin = WeaponAnimatorTheme.ScrollCanvasMargin();
 		_boneCanvas.Layout.Spacing = 2;
-		scroll.Canvas = _boneCanvas;
-		Layout.Add( scroll, 1 );
+		_boneScroll.Canvas = _boneCanvas;
+		Layout.Add( _boneScroll, 1 );
 
 		Layout.Add( WeaponAnimatorTheme.Button(
 			"Confirm weapon bones",
@@ -389,8 +428,30 @@ public sealed class RigAuditPanel : Widget
 		if ( _boneButtons.TryGetValue( _lastSelectedBone, out var previous ) )
 			previous.Tint = WeaponAnimatorTheme.Surface;
 		if ( _boneButtons.TryGetValue( selected, out var current ) )
+		{
 			current.Tint = WeaponAnimatorTheme.Cyan * 0.45f;
+			RevealIfNeeded( current );
+		}
 		_lastSelectedBone = selected;
+	}
+
+	/// <summary>
+	/// Scrolls a bone selected elsewhere - the viewport, most often - into view, so picking a bone
+	/// in the scene does not leave the list parked somewhere else.
+	/// </summary>
+	private void RevealIfNeeded( Widget button )
+	{
+		if ( button.Height <= 0 || _boneScroll.Height <= 0 )
+			return;
+
+		var viewportTop = _boneScroll.ScreenPosition.y;
+		var viewportBottom = viewportTop + _boneScroll.Height;
+		var itemTop = button.ScreenPosition.y;
+		var itemBottom = itemTop + button.Height;
+		if ( itemTop < viewportTop )
+			_boneScroll.VerticalScrollbar.Value -= (viewportTop - itemTop).CeilToInt();
+		else if ( itemBottom > viewportBottom )
+			_boneScroll.VerticalScrollbar.Value += (itemBottom - viewportBottom).CeilToInt();
 	}
 
 	private bool IsVisible( WeaponBoneDefinition bone )
@@ -532,9 +593,12 @@ public sealed class CalibrationInspectorPanel : Widget
 	private readonly LineEdit _knownDistance;
 	private readonly List<Action> _transformRefreshers = [];
 	private readonly List<Action> _documentRefreshers = [];
+	private readonly Dictionary<Guid, Button> _customAnchorButtons = [];
+	private Widget? _customAnchorCanvas;
+	private string _customAnchorSignature = "";
 	private Vector3 _modelDimensions;
 
-	public event Action<ViewportPickMode>? PickRequested;
+	public event Action<ViewportPickMode, Guid>? PickRequested;
 	public event Action? AutoAlignRequested;
 	public event Action? ConfirmRequested;
 	public event Action? RebuildPreviewRequested;
@@ -564,12 +628,12 @@ public sealed class CalibrationInspectorPanel : Widget
 		pickRow.Layout.Add( WeaponAnimatorTheme.Button(
 			"Point A",
 			"looks_one",
-			() => PickRequested?.Invoke( ViewportPickMode.MeasurementFirst ),
+			() => PickRequested?.Invoke( ViewportPickMode.MeasurementFirst, Guid.Empty ),
 			pickRow ), 1 );
 		pickRow.Layout.Add( WeaponAnimatorTheme.Button(
 			"Point B",
 			"looks_two",
-			() => PickRequested?.Invoke( ViewportPickMode.MeasurementSecond ),
+			() => PickRequested?.Invoke( ViewportPickMode.MeasurementSecond, Guid.Empty ),
 			pickRow ), 1 );
 		canvas.Layout.Add( pickRow );
 
@@ -648,6 +712,27 @@ public sealed class CalibrationInspectorPanel : Widget
 		canvas.Layout.Add( Section( canvas, "OUTPUT ANCHORS · OPTIONAL" ) );
 		AddPickButton( canvas, "Muzzle", "flare", ViewportPickMode.MuzzleAnchor );
 		AddPickButton( canvas, "Eject", "outbound", ViewportPickMode.EjectAnchor );
+
+		canvas.Layout.Add( Section( canvas, "CUSTOM ANCHORS · OPTIONAL" ) );
+		var customNote = WeaponAnimatorTheme.Label(
+			"Exported alongside muzzle and eject. Name each one to match the attachment your game "
+				+ "code expects. Grip and alignment markers stay in calibration and are never exported.",
+			canvas,
+			true );
+		customNote.WordWrap = true;
+		canvas.Layout.Add( customNote );
+		_customAnchorCanvas = new Widget( canvas );
+		_customAnchorCanvas.Layout = Layout.Column();
+		_customAnchorCanvas.Layout.Margin = 0;
+		_customAnchorCanvas.Layout.Spacing = 3;
+		canvas.Layout.Add( _customAnchorCanvas );
+		canvas.Layout.Add( WeaponAnimatorTheme.Button(
+			"Add custom anchor",
+			"add_location_alt",
+			AddCustomAnchor,
+			canvas ) );
+		_documentRefreshers.Add( RefreshCustomAnchors );
+
 		canvas.Layout.Add( WeaponAnimatorTheme.Button(
 			"Clear all anchors",
 			"delete_sweep",
@@ -1098,7 +1183,7 @@ public sealed class CalibrationInspectorPanel : Widget
 			() =>
 			{
 				if ( _controller.Document.Calibration.GetAnchor( kind ) is null )
-					PickRequested?.Invoke( mode );
+					PickRequested?.Invoke( mode, Guid.Empty );
 				else
 					_controller.SelectControl( CalibrationSelection.Anchor( kind ) );
 			},
@@ -1107,7 +1192,7 @@ public sealed class CalibrationInspectorPanel : Widget
 		var repick = WeaponAnimatorTheme.Button(
 			"",
 			"my_location",
-			() => PickRequested?.Invoke( mode ),
+			() => PickRequested?.Invoke( mode, Guid.Empty ),
 			row );
 		repick.FixedWidth = 34;
 		repick.ToolTip = $"Pick {name.ToLowerInvariant()} again";
@@ -1143,6 +1228,148 @@ public sealed class CalibrationInspectorPanel : Widget
 		{
 			document.Calibration.Anchors.RemoveAll( anchor => anchor.Kind == kind );
 			if ( document.Workspace.SelectedControl == CalibrationSelection.Anchor( kind ) )
+				document.Workspace.SelectedControl = "";
+			document.Calibration.Confirmed = false;
+		} );
+	}
+
+	/// <summary>
+	/// Rebuilds the custom anchor rows only when the set actually changes, so selecting an anchor
+	/// re-tints in place instead of tearing down live text fields the user may be editing.
+	/// </summary>
+	private void RefreshCustomAnchors()
+	{
+		if ( _customAnchorCanvas is null )
+			return;
+
+		var anchors = _controller.Document.Calibration.CustomAnchors().ToList();
+		var signature = string.Join(
+			'\n',
+			anchors.Select( anchor => $"{anchor.Id:N}\t{anchor.GeneratedAttachmentName}" ) );
+		if ( signature != _customAnchorSignature )
+		{
+			_customAnchorSignature = signature;
+			_customAnchorCanvas.Layout.Clear( true );
+			_customAnchorButtons.Clear();
+			foreach ( var anchor in anchors )
+				AddCustomAnchorRow( anchor );
+		}
+
+		var selected = _controller.Document.Workspace.SelectedControl;
+		foreach ( var pair in _customAnchorButtons )
+		{
+			var anchor = _controller.Document.Calibration.FindAnchor( pair.Key );
+			pair.Value.Tint = anchor is not null
+				&& selected == CalibrationSelection.Anchor( anchor )
+					? WeaponAnimatorTheme.Cyan * 0.48f
+					: WeaponAnimatorTheme.SurfaceRaised;
+		}
+	}
+
+	private void AddCustomAnchorRow( WeaponAnchor anchor )
+	{
+		var id = anchor.Id;
+		var row = RigAuditPanel.Row( _customAnchorCanvas! );
+
+		var edit = new LineEdit( row )
+		{
+			Text = WeaponAnimationNames.AttachmentName( anchor ),
+			PlaceholderText = "attachment_name",
+			FixedHeight = 27,
+			ToolTip = "Attachment name written into the generated prefab and model"
+		};
+		edit.SetStyles( WeaponAnimatorTheme.InputStyle );
+		// EditingFinished fires on focus loss; ReturnPressed covers Enter explicitly.
+		edit.EditingFinished += () => RenameCustomAnchor( id, edit.Text );
+		edit.ReturnPressed += () => RenameCustomAnchor( id, edit.Text );
+		row.Layout.Add( edit, 1 );
+
+		var select = WeaponAnimatorTheme.Button(
+			"",
+			"ads_click",
+			() =>
+			{
+				if ( _controller.Document.Calibration.FindAnchor( id ) is { } target )
+					_controller.SelectControl( CalibrationSelection.Anchor( target ) );
+			},
+			row );
+		select.FixedWidth = 34;
+		select.ToolTip = "Select this anchor and show its gizmo";
+		_customAnchorButtons[id] = select;
+		row.Layout.Add( select );
+
+		var place = WeaponAnimatorTheme.Button(
+			"",
+			"my_location",
+			() => PickRequested?.Invoke( ViewportPickMode.CustomAnchor, id ),
+			row );
+		place.FixedWidth = 34;
+		place.ToolTip = "Click the weapon surface to place this anchor";
+		row.Layout.Add( place );
+
+		var remove = WeaponAnimatorTheme.Button(
+			"",
+			"delete",
+			() => DeleteCustomAnchor( id ),
+			row );
+		remove.FixedWidth = 34;
+		remove.ToolTip = "Delete this anchor";
+		row.Layout.Add( remove );
+
+		_customAnchorCanvas!.Layout.Add( row );
+	}
+
+	private void AddCustomAnchor()
+	{
+		var id = Guid.NewGuid();
+		_controller.Mutate( "Add custom anchor", document =>
+		{
+			document.Calibration.Anchors.Add( new WeaponAnchor
+			{
+				Id = id,
+				Kind = AnchorKind.Custom,
+				Name = "attachment",
+				BoneName = document.Workspace.SelectedBone
+			} );
+			WeaponAnimationNames.RepairCustomAnchorNames( document );
+			document.Calibration.Confirmed = false;
+		} );
+		if ( _controller.Document.Calibration.FindAnchor( id ) is { } added )
+			_controller.SelectControl( CalibrationSelection.Anchor( added ) );
+	}
+
+	/// <summary>
+	/// The field edits the attachment name directly, so what the user types is what generation
+	/// emits. Repair runs here rather than at generation time so any collision suffix is visible
+	/// immediately instead of appearing silently in the output.
+	/// </summary>
+	private void RenameCustomAnchor( Guid id, string value )
+	{
+		_controller.Mutate( "Rename custom anchor", document =>
+		{
+			if ( document.Calibration.FindAnchor( id ) is not { } anchor )
+				return;
+			var slug = WeaponAnimationDocument.Slugify( value );
+			if ( string.IsNullOrWhiteSpace( slug ) )
+				slug = "anchor";
+			if ( anchor.GeneratedAttachmentName == slug && anchor.Name == slug )
+				return;
+			anchor.GeneratedAttachmentName = slug;
+			anchor.Name = slug;
+			WeaponAnimationNames.RepairCustomAnchorNames( document );
+			document.Calibration.Confirmed = false;
+		} );
+	}
+
+	private void DeleteCustomAnchor( Guid id )
+	{
+		_controller.Mutate( "Delete custom anchor", document =>
+		{
+			if ( document.Calibration.FindAnchor( id ) is not { } anchor )
+				return;
+			var token = CalibrationSelection.Anchor( anchor );
+			document.Calibration.Anchors.Remove( anchor );
+			if ( document.Workspace.SelectedControl == token )
 				document.Workspace.SelectedControl = "";
 			document.Calibration.Confirmed = false;
 		} );

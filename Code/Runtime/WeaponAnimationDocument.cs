@@ -389,12 +389,24 @@ public sealed class WeaponCalibration
 	public int Revision { get; set; }
 	public CalibrationSnapshot? Snapshot { get; set; }
 
+	/// <summary>
+	/// Resolves the single anchor of a fixed kind. Custom anchors are identified by id instead,
+	/// because a weapon may carry several of them.
+	/// </summary>
 	public WeaponAnchor? GetAnchor( AnchorKind kind ) =>
 		Anchors.FirstOrDefault( x => x.Kind == kind );
 
+	public WeaponAnchor? FindAnchor( Guid id ) =>
+		Anchors.FirstOrDefault( x => x.Id == id );
+
+	public IEnumerable<WeaponAnchor> CustomAnchors() =>
+		Anchors.Where( x => x.Kind == AnchorKind.Custom );
+
 	public void SetAnchor( WeaponAnchor anchor )
 	{
-		var existing = GetAnchor( anchor.Kind );
+		var existing = anchor.Kind == AnchorKind.Custom
+			? FindAnchor( anchor.Id )
+			: GetAnchor( anchor.Kind );
 		if ( existing is null )
 			Anchors.Add( anchor );
 		else
@@ -427,6 +439,12 @@ public sealed class WeaponAnchor
 {
 	public Guid Id { get; set; } = Guid.NewGuid();
 	public string Name { get; set; } = "";
+
+	/// <summary>
+	/// Attachment name emitted for custom anchors. Stored rather than derived so renaming the
+	/// anchor cannot silently rename an attachment that game code already references.
+	/// </summary>
+	public string GeneratedAttachmentName { get; set; } = "";
 	public AnchorKind Kind { get; set; }
 	public string BoneName { get; set; } = "";
 	public Vector3 LocalPosition { get; set; }
@@ -942,4 +960,74 @@ public static class WeaponAnimationNames
 
 	private static string ShortCustomSequenceName( string stem, Guid id ) =>
 		$"{stem}_{id:N}"[..(stem.Length + 9)];
+
+	/// <summary>
+	/// Attachment names reserved by the fixed anchor kinds that reach generation. The calibration-only
+	/// kinds (grip, bore markers) are never exported, so they reserve nothing.
+	/// </summary>
+	private static readonly string[] ReservedAttachmentNames = ["muzzle", "eject"];
+
+	public static string AttachmentName( WeaponAnchor anchor ) => anchor.Kind switch
+	{
+		AnchorKind.Muzzle => "muzzle",
+		AnchorKind.Eject => "eject",
+		_ => !string.IsNullOrWhiteSpace( anchor.GeneratedAttachmentName )
+			? anchor.GeneratedAttachmentName
+			: WeaponAnimationDocument.Slugify( anchor.Name )
+	};
+
+	/// <summary>
+	/// Assigns each custom anchor a stable, unique attachment name. Mirrors
+	/// <see cref="RepairCustomSequenceNames"/>: an existing stored name is kept whenever it is still
+	/// unique, so generated output stays stable across renames.
+	/// </summary>
+	public static bool RepairCustomAnchorNames( WeaponAnimationDocument document )
+	{
+		var changed = false;
+		var used = ReservedAttachmentNames.ToHashSet( StringComparer.OrdinalIgnoreCase );
+		foreach ( var anchor in document.Calibration.CustomAnchors() )
+		{
+			var existing = string.IsNullOrWhiteSpace( anchor.GeneratedAttachmentName )
+				? ""
+				: WeaponAnimationDocument.Slugify( anchor.GeneratedAttachmentName );
+			if ( !string.IsNullOrWhiteSpace( existing ) && used.Add( existing ) )
+			{
+				if ( anchor.GeneratedAttachmentName != existing )
+				{
+					anchor.GeneratedAttachmentName = existing;
+					changed = true;
+				}
+				continue;
+			}
+
+			var stem = WeaponAnimationDocument.Slugify( anchor.Name );
+			if ( string.IsNullOrWhiteSpace( stem ) )
+				stem = "anchor";
+			var candidate = stem;
+			if ( !used.Add( candidate ) )
+			{
+				var id = anchor.Id.ToString( "N" );
+				var assigned = false;
+				for ( var suffixLength = 8; suffixLength <= id.Length; suffixLength += 4 )
+				{
+					candidate = $"{stem}_{id[..suffixLength]}";
+					if ( !used.Add( candidate ) )
+						continue;
+					assigned = true;
+					break;
+				}
+
+				for ( var collision = 2; !assigned; collision++ )
+				{
+					candidate = $"{stem}_{id}_{collision}";
+					assigned = used.Add( candidate );
+				}
+			}
+			if ( anchor.GeneratedAttachmentName == candidate )
+				continue;
+			anchor.GeneratedAttachmentName = candidate;
+			changed = true;
+		}
+		return changed;
+	}
 }

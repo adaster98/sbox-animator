@@ -315,6 +315,94 @@ public static class WeaponAnimatorSelfTests
 				out var anchorKind )
 				&& anchorKind == AnchorKind.Muzzle,
 			"Calibration anchor control names must round-trip." );
+
+		var muzzleAnchor = new WeaponAnchor { Kind = AnchorKind.Muzzle, Name = "Muzzle" };
+		var customA = new WeaponAnchor { Kind = AnchorKind.Custom, Name = "Suppressor Mount" };
+		var customB = new WeaponAnchor { Kind = AnchorKind.Custom, Name = "Suppressor Mount" };
+		document.Calibration.Anchors.Add( muzzleAnchor );
+		document.Calibration.Anchors.Add( customA );
+		document.Calibration.Anchors.Add( customB );
+		Check(
+			report,
+			WeaponAnimationNames.RepairCustomAnchorNames( document )
+				&& customA.GeneratedAttachmentName == "suppressor_mount"
+				&& customB.GeneratedAttachmentName != customA.GeneratedAttachmentName,
+			"Custom anchors must take readable attachment names and separate on collision." );
+		var resolvedAnchor = customA.GeneratedAttachmentName;
+		Check(
+			report,
+			!WeaponAnimationNames.RepairCustomAnchorNames( document )
+				&& customA.GeneratedAttachmentName == resolvedAnchor,
+			"Resolved custom attachment names must stay stable across later repairs." );
+		customA.Name = "Silencer Mount";
+		Check(
+			report,
+			!WeaponAnimationNames.RepairCustomAnchorNames( document )
+				&& WeaponAnimationNames.AttachmentName( customA ) == resolvedAnchor,
+			"Renaming a custom anchor must not silently rename the generated attachment." );
+		Check(
+			report,
+			WeaponAnimationNames.AttachmentName( muzzleAnchor ) == "muzzle",
+			"Fixed anchor kinds must keep their reserved attachment names." );
+		var reservedClash = new WeaponAnchor { Kind = AnchorKind.Custom, Name = "Muzzle" };
+		document.Calibration.Anchors.Add( reservedClash );
+		Check(
+			report,
+			WeaponAnimationNames.RepairCustomAnchorNames( document )
+				&& reservedClash.GeneratedAttachmentName != "muzzle",
+			"A custom anchor must not claim an attachment name reserved by a fixed kind." );
+		Check(
+			report,
+			CalibrationSelection.TryGetCustomAnchorId(
+				CalibrationSelection.Anchor( customA ),
+				out var customAnchorId )
+				&& customAnchorId == customA.Id
+				&& CalibrationSelection.Resolve(
+					document,
+					CalibrationSelection.Anchor( customB ) ) == customB,
+			"Custom anchor selection tokens must round-trip to the individual anchor." );
+		Check(
+			report,
+			!CalibrationSelection.TryGetCustomAnchorId(
+				CalibrationSelection.Anchor( AnchorKind.Muzzle ),
+				out _ )
+				&& CalibrationSelection.TryGetAnchor(
+					CalibrationSelection.Anchor( customA ),
+					out var customKind )
+				&& customKind == AnchorKind.Custom,
+			"Fixed anchor tokens must carry no id, and custom tokens must still report their kind." );
+		document.Calibration.Anchors.Clear();
+
+		// A .wepanim created outside the New Project flow arrives carrying CreateDefault()'s
+		// "New Weapon", which used to generate every project into weapons/new_weapon.
+		var named = WeaponAnimationDocument.CreateDefault();
+		Check(
+			report,
+			named.Output.AssetName == "new_weapon",
+			"The default document must still carry the documented placeholder asset name." );
+		Check(
+			report,
+			WeaponAnimatorWindow.AdoptAssetFileName( named, "weapons/test2.wepanim" )
+				&& named.Name == "test2"
+				&& named.Output.AssetName == "test2"
+				&& named.Output.GetDefaultRelativeFolder() == "weapons/test2/viewmodel",
+			"Opening a project must adopt its filename for generated names and folders." );
+		Check(
+			report,
+			!WeaponAnimatorWindow.AdoptAssetFileName( named, "weapons/test2.wepanim" ),
+			"Adopting an unchanged filename must not mark the document dirty." );
+		Check(
+			report,
+			WeaponAnimatorWindow.AdoptAssetFileName( named, "weapons/AK 74.wepanim" )
+				&& named.Name == "AK 74"
+				&& named.Output.AssetName == "ak_74",
+			"Save As must rename generated output, slugifying the display name." );
+		Check(
+			report,
+			!WeaponAnimatorWindow.AdoptAssetFileName( named, "" )
+				&& !WeaponAnimatorWindow.AdoptAssetFileName( named, (string?)null )
+				&& named.Output.AssetName == "ak_74",
+			"An unsaved project must keep its existing generated name." );
 		Equal(
 			report,
 			"Alignment marker — rear",
@@ -1422,7 +1510,6 @@ public static class WeaponAnimatorSelfTests
 		var inspector = new SelectedControlInspectorPanel( controller );
 		var clips = new ClipRackPanel(
 			controller,
-			clipsOnly: true,
 			showClipHeader: false );
 		var idleClip = document.EnsureClip( WeaponClipRole.Idle );
 		var deployClip = document.EnsureClip( WeaponClipRole.Deploy );

@@ -220,7 +220,8 @@ public static class WeaponAnimationMigration
 			track.Keys.Sort( ( left, right ) => left.Time.CompareTo( right.Time ) );
 		}
 		var repairedSequenceNames =
-			WeaponAnimationNames.RepairCustomSequenceNames( document );
+			WeaponAnimationNames.RepairCustomSequenceNames( document )
+			| WeaponAnimationNames.RepairCustomAnchorNames( document );
 
 		var repairedLegacyIdle = !separatedRigMigration && RepairLegacyIdleBindPose( document );
 		document.SchemaVersion = WeaponAnimationDocument.CurrentSchemaVersion;
