@@ -87,6 +87,8 @@ public static class WeaponAnimatorTheme
 
 public sealed class WeaponAnimatorButton : Button
 {
+	public bool Flat { get; set; }
+
 	public WeaponAnimatorButton( string text, Widget? parent = null ) : base( text, parent )
 	{
 		ToolTip = text;
@@ -140,7 +142,16 @@ public sealed class WeaponAnimatorButton : Button
 	{
 		var color = Tint.ToHsv();
 		var background = color;
-		if ( Enabled )
+		if ( Flat )
+		{
+			background = Color.Transparent;
+			color = Enabled
+				? color
+				: Theme.SurfaceLightBackground.WithAlpha( 0.35f );
+			if ( Enabled && Paint.HasMouseOver )
+				color = color with { Value = MathF.Min( color.Value + 0.18f, 1.0f ) };
+		}
+		else if ( Enabled )
 		{
 			if ( Paint.HasPressed )
 				background = color with { Value = color.Value + 0.1f };
@@ -152,7 +163,7 @@ public sealed class WeaponAnimatorButton : Button
 			background = color = Theme.SurfaceLightBackground;
 		}
 
-		if ( !Enabled || ReadOnly )
+		if ( !Flat && (!Enabled || ReadOnly) )
 		{
 			color = color.WithSaturation( 0.1f ).WithAlpha( 0.5f );
 			background = color.WithAlpha( 0.2f );
@@ -175,7 +186,7 @@ public sealed class WeaponAnimatorButton : Button
 				background with { Value = background.Value - 0.03f } );
 			Paint.DrawRect( LocalRect.Shrink( 1 ), 3 );
 		}
-		else
+		else if ( !Flat )
 		{
 			color = Color.White.WithAlpha( 0.5f );
 		}

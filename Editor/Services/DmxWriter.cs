@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using Sandbox;
 
 namespace SboxWeaponAnimator.Editor;
@@ -19,8 +20,10 @@ public static class DmxWriter
 	public static string WriteAnimation(
 		WeaponAnimationDocument document,
 		HostSkeleton skeleton,
-		WeaponAnimationClip clip )
+		WeaponAnimationClip clip,
+		CancellationToken cancellationToken = default )
 	{
+		cancellationToken.ThrowIfCancellationRequested();
 		if ( skeleton.Bones.Count == 0 )
 			throw new InvalidOperationException( "The animation host skeleton contains no bones." );
 
@@ -31,6 +34,9 @@ public static class DmxWriter
 		var poses = new IReadOnlyDictionary<string, Transform>[frameCount + 1];
 		for ( var frame = 0; frame <= frameCount; frame++ )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+			if ( (frame & 7) == 7 )
+				Thread.Yield();
 			var time = MathF.Min( frame / sampleRate, clip.Duration );
 			times[frame] = F( time );
 			var evaluated = AnimationPoseEvaluator.Evaluate( document, skeleton, clip, time );
@@ -180,6 +186,7 @@ public static class DmxWriter
 
 		foreach ( var bone in skeleton.Bones )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
 			var values = poses
 				.Select( pose => pose[bone.Name] )
 				.ToArray();

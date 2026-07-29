@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -40,16 +41,44 @@ public sealed class AssetGenerationService
 		CancellationToken cancellationToken = default )
 	{
 		cancellationToken.ThrowIfCancellationRequested();
+		var totalTimer = Stopwatch.StartNew();
+		var previousStageMilliseconds = 0L;
+		void LogStage( string stage, string execution )
+		{
+			var totalMilliseconds = totalTimer.ElapsedMilliseconds;
+			Log.Info(
+				$"[Weapon Animator] generation timing: {stage} took "
+				+ $"{totalMilliseconds - previousStageMilliseconds} ms "
+				+ $"({execution}, total {totalMilliseconds} ms)." );
+			previousStageMilliseconds = totalMilliseconds;
+		}
+
+		WeaponAnimationDocument generationDocument;
+		try
+		{
+			generationDocument = CreateGenerationSnapshot( document );
+		}
+		catch ( Exception ex )
+		{
+			Log.Error( $"[Weapon Animator] could not snapshot the project for generation: {ex}" );
+			return Failed(
+				new ValidationReport(),
+				"generation.snapshot",
+				$"Could not snapshot the project for generation: {ex.Message}" );
+		}
+		LogStage( "snapshot", "editor thread" );
+
 		progress?.Invoke( new GenerationProgress( "Validate", "Validating the weapon project" ) );
-		var validation = WeaponAnimationValidator.ValidateForGeneration( document );
+		var validation = WeaponAnimationValidator.ValidateForGeneration( generationDocument );
 		if ( !validation.IsValid )
 			return Failed( validation, "generation.validation", "Generation is blocked by validation errors." );
+		LogStage( "validation", "editor thread" );
 
 		string outputRoot;
 		string relativeRoot;
 		try
 		{
-			outputRoot = ResolveOutputRoot( document );
+			outputRoot = ResolveOutputRoot( generationDocument );
 			relativeRoot = WeaponSourceImporter.RelativeAssetPath( outputRoot );
 		}
 		catch ( Exception ex )
@@ -63,7 +92,7 @@ public sealed class AssetGenerationService
 
 		try
 		{
-			LoadOwnershipManifest( document, outputRoot );
+			LoadOwnershipManifest( generationDocument, outputRoot );
 		}
 		catch ( Exception ex )
 		{
@@ -73,6 +102,7 @@ public sealed class AssetGenerationService
 				"ownership.manifest",
 				$"Could not read the generated ownership manifest: {ex.Message}" );
 		}
+		LogStage( "paths and ownership", "editor thread" );
 
 		var diagnostics = new List<GenerationDiagnostic>();
 		HostSkeleton skeleton;
@@ -82,14 +112,17 @@ public sealed class AssetGenerationService
 		{
 			cancellationToken.ThrowIfCancellationRequested();
 			progress?.Invoke( new GenerationProgress( "Prepare", "Building generated source files" ) );
-			skeleton = HostSkeletonBuilder.Build( document );
-			files = BuildFiles(
-				document,
+			skeleton = HostSkeletonBuilder.Build( generationDocument );
+			files = await BuildFilesResponsiveAsync(
+				generationDocument,
 				skeleton,
 				relativeRoot,
 				progress,
 				cancellationToken );
-			textureCopies = WeaponMaterialPipeline.BuildOutputTextureCopies( document );
+			textureCopies = WeaponMaterialPipeline.BuildOutputTextureCopies( generationDocument );
+			LogStage(
+				"source assembly",
+				"sequence sampling on worker; final assembly on editor thread" );
 		}
 		catch ( OperationCanceledException )
 		{
@@ -103,7 +136,7 @@ public sealed class AssetGenerationService
 				"generation.sources",
 				$"Could not assemble generated sources: {ex.Message}" );
 		}
-		var previousFiles = document.Manifest.Files
+		var previousFiles = generationDocument.Manifest.Files
 			.Select( x => x.RelativePath )
 			.ToHashSet( StringComparer.OrdinalIgnoreCase );
 
@@ -132,13 +165,15 @@ public sealed class AssetGenerationService
 				Validation = validation,
 				Diagnostics = diagnostics
 			};
+		LogStage( "ownership conflict check", "editor thread" );
 
 		// Generation compiles straight into the output folder. A throwaway staging copy is not
 		// safe here: once ModelDoc compiles a .vmdl the asset database records its .dmx
 		// dependencies, and deleting those sources afterwards leaves the asset permanently
 		// out of date, which the engine then retries every frame for the rest of the session.
 		// The backup and rollback below already restore owned outputs when a compile fails.
-		DiscardAbandonedStage( document );
+		DiscardAbandonedStage( generationDocument );
+		LogStage( "abandoned-stage cleanup", "editor thread" );
 
 		var backups = new Dictionary<string, byte[]>( StringComparer.OrdinalIgnoreCase );
 		var newFiles = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
@@ -152,65 +187,76 @@ public sealed class AssetGenerationService
 				generatedSourcePaths,
 				backups,
 				newFiles );
-			WriteTextureCopies(
+			LogStage( "consumer reset", "editor thread" );
+			await RunResponsiveWorkerAsync( "persistent source writes", () =>
+			{
+				WriteTextureCopies(
+					outputRoot,
+					textureCopies,
+					backups,
+					newFiles,
+					previousFiles,
+					cancellationToken );
+				WriteFiles(
+					outputRoot,
+					files,
+					backups,
+					newFiles,
+					previousFiles,
+					cancellationToken );
+				VerifyGeneratedSources( outputRoot, generatedSourcePaths );
+				return true;
+			}, cancellationToken );
+			LogStage( "persistent source writes", "worker" );
+			progress?.Invoke( new GenerationProgress(
+				"Register",
+				"Registering generated dependencies",
+				0,
+				generatedSourcePaths.Length ) );
+			await RegisterGeneratedDependenciesAsync(
 				outputRoot,
-				textureCopies,
-				backups,
-				newFiles,
-				previousFiles );
-			WriteFiles( outputRoot, files, backups, newFiles, previousFiles );
-			VerifyGeneratedSources( outputRoot, generatedSourcePaths );
-			RegisterGeneratedDependencies( outputRoot, generatedSourcePaths );
+				generatedSourcePaths,
+				progress,
+				cancellationToken );
+			LogStage( "dependency registration", "editor thread with per-file yields" );
 
 			await CompileAndInspectAsync(
-				document,
+				generationDocument,
 				outputRoot,
 				relativeRoot,
 				skeleton,
 				diagnostics,
 				progress,
 				cancellationToken );
+			LogStage( "compile and inspection", "asset system/resource compiler" );
 			if ( diagnostics.Any( x => x.Severity == ValidationSeverity.Error ) )
 				throw new InvalidOperationException( "One or more generated assets failed to compile or reload." );
 
+			progress?.Invoke( new GenerationProgress(
+				"Finalize",
+				"Removing obsolete owned files" ) );
 			RemoveObsoleteOwnedFiles(
-				document,
+				generationDocument,
 				outputRoot,
 				generatedSourcePaths,
 				diagnostics );
-			var inputHash = InputHash( document );
-			var generatedUtc = document.Manifest.InputHash == inputHash
-				? document.Manifest.GeneratedUtc
-				: DateTime.UtcNow;
-			if ( generatedUtc == default )
-				generatedUtc = DateTime.UtcNow;
-
-			var manifest = new GenerationManifest
-			{
-				GeneratorVersion = GeneratorVersion,
-				GeneratedUtc = generatedUtc,
-				InputHash = inputHash,
-				Diagnostics = diagnostics,
-				Files = generatedSourcePaths
-					.OrderBy( path => path )
-					.Select( path => new GeneratedFileRecord
-					{
-						RelativePath = path.Replace( '\\', '/' ),
-						Sha256 = files.TryGetValue( path, out var text )
-							? HashText( text )
-							: WeaponSourceImporter.HashFile(
-								Path.Combine( outputRoot, path ) ),
-						Kind = Path.GetExtension( path ).TrimStart( '.' )
-					} )
-					.ToList()
-			};
-
-			var manifestPath = Path.Combine( outputRoot, ManifestFile );
-			if ( File.Exists( manifestPath ) )
-				backups.TryAdd( manifestPath, File.ReadAllBytes( manifestPath ) );
-			else
-				newFiles.Add( manifestPath );
-			AtomicFile.WriteAllText( manifestPath, Json.Serialize( manifest ) );
+			LogStage( "obsolete output cleanup", "editor thread" );
+			progress?.Invoke( new GenerationProgress(
+				"Finalize",
+				"Hashing generated sources and writing the manifest" ) );
+			var manifest = await RunResponsiveWorkerAsync( "manifest hashing", () =>
+				BuildAndWriteManifest(
+					generationDocument,
+					outputRoot,
+					generatedSourcePaths,
+					files,
+					diagnostics,
+					backups,
+					newFiles,
+					cancellationToken ),
+				cancellationToken );
+			LogStage( "manifest hashing and write", "worker" );
+			generationDocument.Manifest = manifest;
 			document.Manifest = manifest;
 			progress?.Invoke( new GenerationProgress( "Complete", "Generation completed" ) );
 
@@ -267,12 +313,14 @@ public sealed class AssetGenerationService
 		IEnumerable<WeaponMaterialPipeline.GeneratedTextureCopy> copies,
 		Dictionary<string, byte[]> backups,
 		HashSet<string> newFiles,
-		IReadOnlySet<string> previouslyOwnedFiles )
+		IReadOnlySet<string> previouslyOwnedFiles,
+		CancellationToken cancellationToken = default )
 	{
 		foreach ( var copy in copies.OrderBy(
 			copy => copy.RelativePath,
 			StringComparer.OrdinalIgnoreCase ) )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
 			if ( !File.Exists( copy.SourceAbsolute ) )
 				throw new FileNotFoundException(
 					$"Texture source for '{copy.RelativePath}' no longer exists.",
@@ -298,7 +346,8 @@ public sealed class AssetGenerationService
 		IReadOnlyDictionary<string, string> files,
 		Dictionary<string, byte[]>? backups = null,
 		HashSet<string>? newFiles = null,
-		IReadOnlySet<string>? previouslyOwnedFiles = null )
+		IReadOnlySet<string>? previouslyOwnedFiles = null,
+		CancellationToken cancellationToken = default )
 	{
 		Directory.CreateDirectory( root );
 
@@ -306,6 +355,7 @@ public sealed class AssetGenerationService
 		// sees a model whose animation files have not landed yet.
 		foreach ( var name in OrderForWrite( files.Keys ) )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
 			var absolute = Path.Combine( root, name );
 			var directory = Path.GetDirectoryName( absolute );
 			if ( !string.IsNullOrWhiteSpace( directory ) )
@@ -464,22 +514,40 @@ public sealed class AssetGenerationService
 			+ $"under '{outputRoot}'." );
 	}
 
-	private static void RegisterGeneratedDependencies(
+	private static async Task RegisterGeneratedDependenciesAsync(
 		string outputRoot,
-		IEnumerable<string> relativePaths )
+		IEnumerable<string> relativePaths,
+		Action<GenerationProgress>? progress,
+		CancellationToken cancellationToken )
 	{
 		var sources = relativePaths
 			.Where( path => !IsCompiledConsumer( path ) )
 			.Select( path => Path.Combine( outputRoot, path ) )
 			.ToArray();
-		foreach ( var absolute in sources )
+		for ( var index = 0; index < sources.Length; index++ )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+			var absolute = sources[index];
+			progress?.Invoke( new GenerationProgress(
+				"Register",
+				Path.GetFileName( absolute ),
+				index + 1,
+				sources.Length ) );
+			var timer = Stopwatch.StartNew();
 			var asset = AssetSystem.RegisterFile( absolute );
+			Log.Info(
+				$"[Weapon Animator] dependency registration '{Path.GetFileName( absolute )}' "
+				+ $"took {timer.ElapsedMilliseconds} ms "
+				+ $"({new FileInfo( absolute ).Length} bytes)." );
 			if ( asset is null || asset.IsDeleted || !asset.HasSourceFile )
 			{
 				throw new IOException(
 					$"The asset system did not retain generated dependency '{absolute}'." );
 			}
+
+			// RegisterFile can synchronously inspect a large DMX. Yield between dependencies so
+			// repaint, progress, and cancellation are serviced before the next inspection.
+			await GameTask.Yield();
 		}
 
 		Log.Info(
@@ -633,6 +701,84 @@ public sealed class AssetGenerationService
 		CancellationToken cancellationToken = default )
 	{
 		cancellationToken.ThrowIfCancellationRequested();
+		var preparedClips = BuildClipSources(
+			document,
+			skeleton,
+			progress,
+			cancellationToken );
+		return AssembleFiles( document, skeleton, relativeRoot, preparedClips );
+	}
+
+	private static async Task<Dictionary<string, string>> BuildFilesResponsiveAsync(
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton,
+		string relativeRoot,
+		Action<GenerationProgress>? progress,
+		CancellationToken cancellationToken )
+	{
+		var orderedClips = GeneratedClips( document )
+			.OrderBy( clip => clip.Name )
+			.ToArray();
+		var preparedClips = new List<PreparedClipSource>( orderedClips.Length );
+		for ( var clipIndex = 0; clipIndex < orderedClips.Length; clipIndex++ )
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			var clip = orderedClips[clipIndex];
+			progress?.Invoke( new GenerationProgress(
+				"Sequences",
+				$"Sampling {clip.Name}",
+				clipIndex + 1,
+				orderedClips.Length ) );
+			var source = await RunResponsiveWorkerAsync( $"sequence {clip.Name}", () =>
+				DmxWriter.WriteAnimation(
+					document,
+					skeleton,
+					clip,
+					cancellationToken ),
+				cancellationToken );
+			preparedClips.Add( new PreparedClipSource( clip, source ) );
+		}
+
+		cancellationToken.ThrowIfCancellationRequested();
+		return AssembleFiles( document, skeleton, relativeRoot, preparedClips );
+	}
+
+	private static IReadOnlyList<PreparedClipSource> BuildClipSources(
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton,
+		Action<GenerationProgress>? progress,
+		CancellationToken cancellationToken )
+	{
+		var orderedClips = GeneratedClips( document )
+			.OrderBy( clip => clip.Name )
+			.ToArray();
+		var preparedClips = new List<PreparedClipSource>( orderedClips.Length );
+		for ( var clipIndex = 0; clipIndex < orderedClips.Length; clipIndex++ )
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			var clip = orderedClips[clipIndex];
+			progress?.Invoke( new GenerationProgress(
+				"Sequences",
+				$"Sampling {clip.Name}",
+				clipIndex + 1,
+				orderedClips.Length ) );
+			preparedClips.Add( new PreparedClipSource(
+				clip,
+				DmxWriter.WriteAnimation(
+					document,
+					skeleton,
+					clip,
+					cancellationToken ) ) );
+		}
+		return preparedClips;
+	}
+
+	private static Dictionary<string, string> AssembleFiles(
+		WeaponAnimationDocument document,
+		HostSkeleton skeleton,
+		string relativeRoot,
+		IReadOnlyList<PreparedClipSource> preparedClips )
+	{
 		var slug = WeaponAnimationDocument.Slugify( document.Output.AssetName );
 		var files = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
 		var referenceName = $"{slug}_host_reference.dmx";
@@ -649,20 +795,12 @@ public sealed class AssetGenerationService
 		}
 
 		var clipSources = new List<(WeaponAnimationClip Clip, string Source)>();
-		var generatedClips = GeneratedClips( document );
-		var orderedClips = generatedClips.OrderBy( x => x.Name ).ToArray();
-		for ( var clipIndex = 0; clipIndex < orderedClips.Length; clipIndex++ )
+		foreach ( var preparedClip in preparedClips )
 		{
-			cancellationToken.ThrowIfCancellationRequested();
-			var clip = orderedClips[clipIndex];
-			progress?.Invoke( new GenerationProgress(
-				"Sequences",
-				$"Sampling {clip.Name}",
-				clipIndex + 1,
-				orderedClips.Length ) );
+			var clip = preparedClip.Clip;
 			var clipName =
 				$"{slug}_sequence_{WeaponAnimationNames.SequenceName( clip )}.dmx";
-			files[clipName] = DmxWriter.WriteAnimation( document, skeleton, clip );
+			files[clipName] = preparedClip.Source;
 			clipSources.Add( (clip, $"{relativeRoot}/{clipName}") );
 		}
 
@@ -737,6 +875,39 @@ public sealed class AssetGenerationService
 				$"{relativeRoot}/{hostName}" );
 
 		return files;
+	}
+
+	private sealed record PreparedClipSource(
+		WeaponAnimationClip Clip,
+		string Source );
+
+	private static async Task<T> RunResponsiveWorkerAsync<T>(
+		string stage,
+		Func<T> work,
+		CancellationToken cancellationToken )
+	{
+		var worker = GameTask.RunInThreadAsync( work );
+		var timer = Stopwatch.StartNew();
+		var nextHeartbeat = 2000L;
+		while ( !worker.IsCompleted )
+		{
+			// Explicitly return to the editor task loop while the worker owns CPU-heavy text work.
+			await GameTask.DelayRealtime( 16 );
+			if ( timer.ElapsedMilliseconds < nextHeartbeat )
+				continue;
+
+			Log.Info(
+				$"[Weapon Animator] worker heartbeat: '{stage}' is still running after "
+				+ $"{timer.ElapsedMilliseconds} ms; editor thread "
+				+ $"{Environment.CurrentManagedThreadId} is pumping." );
+			nextHeartbeat += 2000;
+		}
+
+		// Managed loops observe cancellation internally. Native calls cannot be interrupted, so
+		// await their return before cancellation is allowed to start rollback.
+		var result = await worker;
+		cancellationToken.ThrowIfCancellationRequested();
+		return result;
 	}
 
 	private static string ResolveEmbeddableSourcePath( WeaponAnimationDocument document )
@@ -828,9 +999,8 @@ public sealed class AssetGenerationService
 	private const float HostReloadTimeoutSeconds = 20.0f;
 
 	/// <summary>
-	/// <see cref="Asset.Compile"/> only queues the work; the resource compiler finishes on later
-	/// frames. Sampling <see cref="Asset.IsCompiled"/> straight afterwards reports a false
-	/// failure, so wait for the asset system to settle on a real verdict.
+	/// Asset compilation is main-thread-only. The resource compiler may hold the editor while the
+	/// request runs, then this method polls until the replacement asset is live.
 	/// </summary>
 	internal static async Task<bool> WaitForCompileAsync(
 		Asset asset,
@@ -970,6 +1140,7 @@ public sealed class AssetGenerationService
 		async Task<bool> Compile( string file, string? description = null )
 		{
 			cancellationToken.ThrowIfCancellationRequested();
+			var timer = Stopwatch.StartNew();
 			compileIndex++;
 			progress?.Invoke( new GenerationProgress(
 				"Compile",
@@ -977,7 +1148,11 @@ public sealed class AssetGenerationService
 				compileIndex,
 				compileTotal ) );
 			var absolute = Path.Combine( outputRoot, file );
+			var registrationTimer = Stopwatch.StartNew();
 			var asset = AssetSystem.RegisterFile( absolute );
+			Log.Info(
+				$"[Weapon Animator] consumer registration '{description ?? file}' took "
+				+ $"{registrationTimer.ElapsedMilliseconds} ms." );
 			if ( asset is null )
 			{
 				Log.Error( $"[Weapon Animator] could not register '{absolute}' as an asset." );
@@ -994,6 +1169,9 @@ public sealed class AssetGenerationService
 				absolute,
 				cancellationToken ) )
 			{
+				Log.Info(
+					$"[Weapon Animator] generation timing: compiled "
+					+ $"'{description ?? file}' in {timer.ElapsedMilliseconds} ms." );
 				diagnostics.Add( Diagnostic(
 					ValidationSeverity.Info,
 					"compile.ok",
@@ -1003,6 +1181,9 @@ public sealed class AssetGenerationService
 			}
 
 			Log.Error( $"[Weapon Animator] failed to compile '{absolute}'." );
+			Log.Error(
+				$"[Weapon Animator] generation timing: failed '{description ?? file}' "
+				+ $"after {timer.ElapsedMilliseconds} ms." );
 			diagnostics.Add( Diagnostic(
 				ValidationSeverity.Error,
 				"compile.failed",
@@ -1492,6 +1673,69 @@ public sealed class AssetGenerationService
 		clone.Manifest = new GenerationManifest();
 		clone.Workspace = new WorkspaceState();
 		return HashText( Json.Serialize( clone ) );
+	}
+
+	private static GenerationManifest BuildAndWriteManifest(
+		WeaponAnimationDocument document,
+		string outputRoot,
+		IEnumerable<string> generatedSourcePaths,
+		IReadOnlyDictionary<string, string> textFiles,
+		List<GenerationDiagnostic> diagnostics,
+		Dictionary<string, byte[]> backups,
+		HashSet<string> newFiles,
+		CancellationToken cancellationToken )
+	{
+		cancellationToken.ThrowIfCancellationRequested();
+		var inputHash = InputHash( document );
+		var generatedUtc = document.Manifest.InputHash == inputHash
+			? document.Manifest.GeneratedUtc
+			: DateTime.UtcNow;
+		if ( generatedUtc == default )
+			generatedUtc = DateTime.UtcNow;
+
+		var records = new List<GeneratedFileRecord>();
+		foreach ( var path in generatedSourcePaths.OrderBy( path => path ) )
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			records.Add( new GeneratedFileRecord
+			{
+				RelativePath = path.Replace( '\\', '/' ),
+				Sha256 = textFiles.TryGetValue( path, out var text )
+					? HashText( text )
+					: WeaponSourceImporter.HashFile(
+						Path.Combine( outputRoot, path ) ),
+				Kind = Path.GetExtension( path ).TrimStart( '.' )
+			} );
+		}
+
+		var manifest = new GenerationManifest
+		{
+			GeneratorVersion = GeneratorVersion,
+			GeneratedUtc = generatedUtc,
+			InputHash = inputHash,
+			Diagnostics = diagnostics,
+			Files = records
+		};
+		var manifestPath = Path.Combine( outputRoot, ManifestFile );
+		if ( File.Exists( manifestPath ) )
+			backups.TryAdd( manifestPath, File.ReadAllBytes( manifestPath ) );
+		else
+			newFiles.Add( manifestPath );
+		AtomicFile.WriteAllText( manifestPath, Json.Serialize( manifest ) );
+		return manifest;
+	}
+
+	private static WeaponAnimationDocument CreateGenerationSnapshot(
+		WeaponAnimationDocument document )
+	{
+		var snapshot = Json.Deserialize<WeaponAnimationDocument>(
+			Json.Serialize( document ) )
+			?? throw new InvalidOperationException(
+				"Could not clone the weapon animation document." );
+		snapshot.Manifest = Json.Deserialize<GenerationManifest>(
+			Json.Serialize( document.Manifest ?? new GenerationManifest() ) )
+			?? new GenerationManifest();
+		return snapshot;
 	}
 
 	private static string HashText( string value ) =>

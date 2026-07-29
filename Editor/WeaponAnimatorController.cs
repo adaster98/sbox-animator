@@ -39,6 +39,7 @@ public sealed class WeaponAnimatorController
 	public event Action? TimelineChanged;
 	public event Action? TimelineViewChanged;
 	public event Action? PlaybackChanged;
+	public event Action? ClipPlaybackSettingsChanged;
 
 	public bool CanUndo => _undo.Count > 0;
 	public bool CanRedo => _redo.Count > 0;
@@ -64,12 +65,22 @@ public sealed class WeaponAnimatorController
 
 	public void Mutate( string description, Action<WeaponAnimationDocument> mutation )
 	{
+		if ( !ApplyMutation( description, mutation ) )
+			return;
+
+		DocumentChanged?.Invoke();
+	}
+
+	private bool ApplyMutation(
+		string description,
+		Action<WeaponAnimationDocument> mutation )
+	{
 		EndContinuousEdit();
 		var before = Serialize( Document );
 		mutation( Document );
 		var after = Serialize( Document );
 		if ( before == after )
-			return;
+			return false;
 
 		_undo.Add( new DocumentSnapshot( description, before ) );
 		if ( _undo.Count > MaximumHistory )
@@ -77,7 +88,7 @@ public sealed class WeaponAnimatorController
 		_redo.Clear();
 		LastAction = description;
 		SetDirty( true );
-		DocumentChanged?.Invoke();
+		return true;
 	}
 
 	public void UpdateWorkspacePreference(
@@ -228,6 +239,74 @@ public sealed class WeaponAnimatorController
 		SelectionChanged?.Invoke();
 		KeySelectionChanged?.Invoke();
 		DocumentChanged?.Invoke();
+	}
+
+	public void RenameCustomClip( Guid clipId, string name )
+	{
+		name = name?.Trim() ?? "";
+		if ( string.IsNullOrWhiteSpace( name ) )
+			return;
+
+		Mutate( "Rename custom clip", document =>
+		{
+			var clip = document.Clips.FirstOrDefault( item =>
+				item.Id == clipId && item.Role == WeaponClipRole.Custom );
+			if ( clip is null || clip.Name == name )
+				return;
+
+			clip.Name = name;
+			clip.GeneratedSequenceName = "";
+			WeaponAnimationNames.RepairCustomSequenceNames( document );
+		} );
+	}
+
+	public void DeleteCustomClip( Guid clipId )
+	{
+		var removed = false;
+		Mutate( "Delete custom clip", document =>
+		{
+			var clip = document.Clips.FirstOrDefault( item =>
+				item.Id == clipId && item.Role == WeaponClipRole.Custom );
+			if ( clip is null )
+				return;
+
+			removed = document.Clips.Remove( clip );
+			document.Workspace.ClearWorkingPoses( clipId );
+			document.Workspace.TimelineViews.RemoveAll( item => item.ClipId == clipId );
+			document.Workspace.CurveViews.RemoveAll( item => item.ClipId == clipId );
+			if ( document.Workspace.SelectedClipId == clipId )
+			{
+				document.Workspace.SelectedClipId =
+					document.Clips.FirstOrDefault( item => item.Role == WeaponClipRole.Idle )?.Id
+					?? document.Clips.FirstOrDefault()?.Id
+					?? Guid.Empty;
+				document.Workspace.TimelineTime = 0;
+			}
+		} );
+
+		if ( !removed )
+			return;
+
+		_selectedKeys.Clear();
+		SetPlaying( false );
+		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
+		TimelineChanged?.Invoke();
+	}
+
+	public void ToggleSelectedClipLoop()
+	{
+		var clipId = Document.Workspace.SelectedClipId;
+		if ( !ApplyMutation( "Toggle clip loop", document =>
+		{
+			var clip = document.Clips.FirstOrDefault( item => item.Id == clipId );
+			if ( clip is not null )
+				clip.Loop = !clip.Loop;
+		} ) )
+			return;
+
+		// Looping changes playback/export behavior but does not invalidate any editor panels.
+		ClipPlaybackSettingsChanged?.Invoke();
 	}
 
 	public void SetTimelineTime( float time )
@@ -575,7 +654,6 @@ public sealed class WeaponAnimatorController
 	{
 		if ( _selectedKeys.Count > 0 )
 		{
-			SetPlaying( false );
 			BeginContinuousEdit( "Move keys" );
 		}
 	}

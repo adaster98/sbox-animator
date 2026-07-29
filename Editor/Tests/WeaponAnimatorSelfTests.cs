@@ -28,6 +28,7 @@ public static class WeaponAnimatorSelfTests
 	{
 		var report = new WeaponAnimatorSelfTestReport();
 		Run( report, "document roles", TestDocumentRoles );
+		Run( report, "custom clip management and document title", TestCustomClipManagement );
 		Run( report, "scale and units", TestScaleAndUnits );
 		Run( report, "anchor lifecycle", TestAnchorLifecycle );
 		Run( report, "default grip binding", TestDefaultGripBinding );
@@ -327,6 +328,93 @@ public static class WeaponAnimatorSelfTests
 			"right-column-layout",
 			reopened.Workspace.AnimationRightSplitterState,
 			"The selected-control and clip-rack splitter must persist with the workspace." );
+	}
+
+	private static void TestCustomClipManagement(
+		WeaponAnimatorSelfTestReport report )
+	{
+		var document = WeaponAnimationDocument.CreateDefault( "Internal Name" );
+		var first = WeaponAnimationClip.Create( WeaponClipRole.Custom );
+		first.Name = "Mechanical Check";
+		var second = WeaponAnimationClip.Create( WeaponClipRole.Custom );
+		second.Name = "Mechanical Check";
+		document.Clips.Add( first );
+		document.Clips.Add( second );
+		WeaponAnimationNames.RepairCustomSequenceNames( document );
+		document.Workspace.SelectedClipId = first.Id;
+		document.Workspace.WorkingPoseOverrides.Add( new WorkingPoseOverride
+		{
+			ClipId = first.Id,
+			Target = "weapon_root"
+		} );
+		document.Workspace.TimelineViews.Add( new TimelineViewState
+		{
+			ClipId = first.Id
+		} );
+		document.Workspace.CurveViews.Add( new CurveViewState
+		{
+			ClipId = first.Id
+		} );
+
+		var controller = new WeaponAnimatorController();
+		controller.SetDocument( document );
+		controller.RenameCustomClip( first.Id, "Safety Check" );
+		Equal(
+			report,
+			"Safety Check",
+			first.Name,
+			"Custom clips must be renameable." );
+		Equal(
+			report,
+			"safety_check",
+			first.GeneratedSequenceName,
+			"Renaming a custom clip must assign a readable collision-safe sequence name." );
+		controller.Undo();
+		var restoredFirst = controller.Document.Clips.First( clip => clip.Id == first.Id );
+		Equal(
+			report,
+			"Mechanical Check",
+			restoredFirst.Name,
+			"Custom clip rename must be one undoable action." );
+
+		controller.DeleteCustomClip( first.Id );
+		Check(
+			report,
+			controller.Document.Clips.All( clip => clip.Id != first.Id )
+				&& controller.Document.Workspace.WorkingPoseOverrides.All(
+					item => item.ClipId != first.Id )
+				&& controller.Document.Workspace.TimelineViews.All(
+					item => item.ClipId != first.Id )
+				&& controller.Document.Workspace.CurveViews.All(
+					item => item.ClipId != first.Id ),
+			"Deleting a custom clip must remove its clip-owned workspace state." );
+		Equal(
+			report,
+			WeaponClipRole.Idle,
+			controller.Document.GetSelectedClip()!.Role,
+			"Deleting the selected custom clip must return selection to Idle." );
+		controller.Undo();
+		Check(
+			report,
+			controller.Document.Clips.Any( clip => clip.Id == first.Id ),
+			"Custom clip deletion must restore the complete clip through one undo." );
+
+		Equal(
+			report,
+			"S&box Weapon Animator — p30l.wepanim",
+			WeaponAnimatorWindow.ComposeWindowTitle(
+				"weapons/pistols/p30l.wepanim",
+				"New Weapon",
+				false ),
+			"The window title must use the open asset filename instead of the stale document name." );
+		Equal(
+			report,
+			"S&box Weapon Animator — p30l.wepanim *",
+			WeaponAnimatorWindow.ComposeWindowTitle(
+				"weapons/pistols/p30l.wepanim",
+				"New Weapon",
+				true ),
+			"The filename caption must retain the dirty marker." );
 	}
 
 	private static void TestScaleAndUnits( WeaponAnimatorSelfTestReport report )
@@ -1390,6 +1478,35 @@ public static class WeaponAnimatorSelfTests
 				x.MinimumWidth >= x.PreferredWidth
 				&& x.MinimumWidth <= MathF.Ceiling( x.PreferredWidth ) + 0.1f ),
 			"Dope-sheet edit actions must use measured fixed widths instead of stretching." );
+		var loopButton = WidgetTree( timeline )
+			.OfType<WeaponAnimatorButton>()
+			.FirstOrDefault( button => button.Icon == "repeat" );
+		Check(
+			report,
+			loopButton is not null
+				&& loopButton.IsToggle
+				&& loopButton.Flat
+				&& string.IsNullOrWhiteSpace( loopButton.Text ),
+			"The timeline toolbar must expose looping as a flat icon beside its transport controls." );
+		var loopDocumentEvents = 0;
+		var loopSettingsEvents = 0;
+		controller.DocumentChanged += () => loopDocumentEvents++;
+		controller.ClipPlaybackSettingsChanged += () => loopSettingsEvents++;
+		controller.ToggleSelectedClipLoop();
+		Check(
+			report,
+			idleClip.Loop == false && loopButton?.IsChecked == false,
+			"The loop toggle must update both the selected clip and its toolbar state." );
+		Equal(
+			report,
+			0,
+			loopDocumentEvents,
+			"Changing loop playback must not rebuild document-driven inspector panels." );
+		Equal(
+			report,
+			1,
+			loopSettingsEvents,
+			"Changing loop playback must publish one focused transport-state update." );
 		Near(
 			report,
 			500,
@@ -2237,6 +2354,27 @@ public static class WeaponAnimatorSelfTests
 			1,
 			TimelineInteraction.TimeToFrame( document.Workspace.TimelineTime, 30 ),
 			"Playback must advance through whole-frame preview positions." );
+		var movingTrack = clip.EnsureTrack( "weapon_root" );
+		var movingKey = WeaponAnimationMath.UpsertKey(
+			movingTrack,
+			0.2f,
+			new Transform( new Vector3( 2, 0, 0 ), Rotation.Identity, Vector3.One ) );
+		controller.SetSelectedKeys( [movingKey.Id] );
+		controller.BeginSelectedKeyMove();
+		controller.UpdateSelectedKeyMove(
+			new Dictionary<Guid, float> { [movingKey.Id] = movingKey.Time },
+			1 );
+		Check(
+			report,
+			controller.IsPlaying,
+			"Selecting and dragging a key must not pause viewport playback." );
+		controller.EndSelectedKeyMove(
+			new Dictionary<Guid, float> { [movingKey.Id] = 0.2f },
+			1 );
+		Check(
+			report,
+			controller.IsPlaying,
+			"Committing a key drag must leave playback running for live SampleTrack checks." );
 		controller.StepTimelineFrame( 1 );
 		Check( report, !controller.IsPlaying, "Manual frame stepping must pause playback." );
 		Equal(
@@ -2251,6 +2389,25 @@ public static class WeaponAnimatorSelfTests
 			30,
 			TimelineInteraction.TimeToFrame( document.Workspace.TimelineTime, 30 ),
 			"Frame stepping must clamp at the final frame." );
+		controller.ToggleSelectedClipLoop();
+		Check(
+			report,
+			clip.Loop,
+			"The selected clip loop state must be editable through the shared controller." );
+		controller.TogglePlayback();
+		controller.AdvancePlayback( 1.1f );
+		Check(
+			report,
+			controller.IsPlaying
+				&& TimelineInteraction.TimeToFrame(
+					document.Workspace.TimelineTime,
+					clip.SampleRate ) == 3,
+			"Looped playback must wrap and remain active." );
+		controller.Undo();
+		Check(
+			report,
+			!controller.Document.GetSelectedClip()!.Loop,
+			"Changing the loop state must be one undoable action." );
 	}
 
 	private static void TestTwoBoneIk( WeaponAnimatorSelfTestReport report )
@@ -3344,6 +3501,23 @@ public static class WeaponAnimatorSelfTests
 				report,
 				cancelled,
 				"Generation must honor cancellation before assembling or replacing output files." );
+			cancelled = false;
+			try
+			{
+				DmxWriter.WriteAnimation(
+					document,
+					HostSkeletonBuilder.Build( document, includeArmProfile: false ),
+					document.EnsureClip( WeaponClipRole.Idle ),
+					cancellation.Token );
+			}
+			catch ( OperationCanceledException )
+			{
+				cancelled = true;
+			}
+			Check(
+				report,
+				cancelled,
+				"DMX frame sampling must observe cancellation inside the worker-safe generation path." );
 		}
 		finally
 		{

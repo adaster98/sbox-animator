@@ -1163,10 +1163,24 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 	private void RefreshTitle()
 	{
-		var name = _controller.Document.Name;
-		var dirty = _controller.IsDirty ? " *" : "";
-		WindowTitle = $"S&box Weapon Animator — {name}{dirty}";
+		WindowTitle = ComposeWindowTitle(
+			_asset?.Path ?? "",
+			_controller.Document.Name,
+			_controller.IsDirty );
 		Title = WindowTitle;
+	}
+
+	internal static string ComposeWindowTitle(
+		string assetPath,
+		string documentName,
+		bool dirty )
+	{
+		var fileName = string.IsNullOrWhiteSpace( assetPath )
+			? documentName
+			: Path.GetFileName( assetPath.Replace( '\\', '/' ) );
+		if ( string.IsNullOrWhiteSpace( fileName ) )
+			fileName = "New Weapon";
+		return $"S&box Weapon Animator — {fileName}{(dirty ? " *" : "")}";
 	}
 
 	private void RefreshToolbarState()

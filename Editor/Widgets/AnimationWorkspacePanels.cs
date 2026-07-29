@@ -297,6 +297,8 @@ public sealed class ClipRackPanel : Widget
 		if ( _propertiesCanvas is null || clip is null )
 			return;
 		_propertiesCanvas.Layout.Add( Header( "CLIP PROPERTIES", _propertiesCanvas ) );
+		if ( clip.Role == WeaponClipRole.Custom )
+			AddCustomClipProperties( clip );
 		var sequence = WeaponAnimatorTheme.Label(
 			$"Sequence: {WeaponAnimationNames.SequenceName( clip )}",
 			_propertiesCanvas,
@@ -360,6 +362,54 @@ public sealed class ClipRackPanel : Widget
 				true ) );
 		}
 		_propertiesCanvas.Layout.AddStretchCell();
+	}
+
+	private void AddCustomClipProperties( WeaponAnimationClip clip )
+	{
+		if ( _propertiesCanvas is null )
+			return;
+
+		var nameRow = RigAuditPanel.Row( _propertiesCanvas );
+		nameRow.Layout.Add( WeaponAnimatorTheme.Label( "Name", nameRow, true ) );
+		var name = new LineEdit( nameRow )
+		{
+			Text = clip.Name,
+			FixedHeight = 26
+		};
+		name.SetStyles( WeaponAnimatorTheme.InputStyle );
+		name.EditingFinished += () =>
+		{
+			var renamed = name.Text.Trim();
+			if ( string.IsNullOrWhiteSpace( renamed ) )
+			{
+				name.Text = clip.Name;
+				StatusChanged?.Invoke(
+					"A custom clip name cannot be empty.",
+					ValidationSeverity.Warning );
+				return;
+			}
+			_controller.RenameCustomClip( clip.Id, renamed );
+		};
+		nameRow.Layout.Add( name, 1 );
+		_propertiesCanvas.Layout.Add( nameRow );
+
+		var delete = (WeaponAnimatorButton)WeaponAnimatorTheme.Button(
+			"Delete custom clip",
+			"delete",
+			() => RequestDeleteCustomClip( clip ),
+			_propertiesCanvas );
+		delete.Tint = WeaponAnimatorTheme.Coral * 0.38f;
+		_propertiesCanvas.Layout.Add( delete );
+	}
+
+	private void RequestDeleteCustomClip( WeaponAnimationClip clip )
+	{
+		Dialog.AskConfirm(
+			() => _controller.DeleteCustomClip( clip.Id ),
+			$"Delete the custom clip '{clip.Name}' and all of its keys, curves, tags, and visibility tracks?",
+			"Delete Custom Clip",
+			"Delete",
+			"Cancel" );
 	}
 
 	private void AddClipNumber( string label, float value, Action<float> changed )
@@ -1230,6 +1280,7 @@ public sealed class AnimationTimelinePanel : Widget
 	private readonly Label _timeLabel;
 	private readonly WeaponAnimatorButton _playButton;
 	private readonly WeaponAnimatorButton _curvesButton;
+	private readonly WeaponAnimatorButton _loopButton;
 
 	public AnimationTimelinePanel( WeaponAnimatorController controller, Widget? parent = null ) : base( parent )
 	{
@@ -1259,12 +1310,26 @@ public sealed class AnimationTimelinePanel : Widget
 
 		var player = _toolbar.CenterSection;
 		player.Layout.Spacing = 3;
+		player.Layout.Add( new Widget( player )
+		{
+			FixedWidth = 28,
+			MinimumWidth = 28,
+			FixedHeight = 26
+		} );
 		player.Layout.Add( PlayerButton( "first_page", "Jump to first frame", _controller.JumpToFirstFrame, player ) );
 		player.Layout.Add( PlayerButton( "skip_previous", "Previous frame", () => _controller.StepTimelineFrame( -1 ), player ) );
 		_playButton = PlayerButton( "play_arrow", "Play", _controller.TogglePlayback, player );
 		player.Layout.Add( _playButton );
 		player.Layout.Add( PlayerButton( "skip_next", "Next frame", () => _controller.StepTimelineFrame( 1 ), player ) );
 		player.Layout.Add( PlayerButton( "last_page", "Jump to last frame", _controller.JumpToLastFrame, player ) );
+		_loopButton = PlayerButton(
+			"repeat",
+			"Loop playback",
+			_controller.ToggleSelectedClipLoop,
+			player );
+		_loopButton.IsToggle = true;
+		_loopButton.Flat = true;
+		player.Layout.Add( _loopButton );
 
 		var right = _toolbar.RightSection;
 		right.Layout.AddStretchCell();
@@ -1279,6 +1344,7 @@ public sealed class AnimationTimelinePanel : Widget
 		_controller.TimelineChanged += Refresh;
 		_controller.TimelineViewChanged += Refresh;
 		_controller.PlaybackChanged += Refresh;
+		_controller.ClipPlaybackSettingsChanged += Refresh;
 		Refresh();
 	}
 
@@ -1288,6 +1354,7 @@ public sealed class AnimationTimelinePanel : Widget
 		_controller.TimelineChanged -= Refresh;
 		_controller.TimelineViewChanged -= Refresh;
 		_controller.PlaybackChanged -= Refresh;
+		_controller.ClipPlaybackSettingsChanged -= Refresh;
 		base.OnDestroyed();
 	}
 
@@ -1310,6 +1377,14 @@ public sealed class AnimationTimelinePanel : Widget
 		}
 		_playButton.Icon = _controller.IsPlaying ? "pause" : "play_arrow";
 		_playButton.ToolTip = _controller.IsPlaying ? "Pause" : "Play";
+		_loopButton.Enabled = clip is not null;
+		_loopButton.IsChecked = clip?.Loop == true;
+		_loopButton.Tint = clip?.Loop == true
+			? WeaponAnimatorTheme.Cyan
+			: WeaponAnimatorTheme.Muted;
+		_loopButton.ToolTip = clip?.Loop == true
+			? "Loop playback is enabled"
+			: "Loop playback";
 		var curves = _controller.Document.Workspace.CurveEditorVisible;
 		_curvesButton.IsChecked = curves;
 		_curvesButton.Text = curves ? "Keys" : "Curves";

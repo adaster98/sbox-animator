@@ -94,6 +94,11 @@ Useful timeline tools include:
 - Use the range bar above the ruler to pan or zoom through longer clips.
 - Press **Curves** to edit motion speed or individual transform channels.
 - Press **Reverse** to reverse selected keys within their range. With nothing selected, it reverses the entire clip—useful when turning a Deploy animation into a Holster animation.
+- Toggle the loop icon beside the playback controls to repeat the active clip while refining motion
+  and curves.
+
+Custom clips can be renamed or deleted from their Clip Properties. Renaming also gives the generated
+sequence a stable, readable name.
 
 ## Part visibility
 
