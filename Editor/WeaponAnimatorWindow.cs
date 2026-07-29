@@ -224,33 +224,42 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		view.AddOption( "Calibrate", "straighten", RequestCalibrationStage );
 		view.AddOption( "Animate", "animation", () => SwitchStage( WeaponAnimatorStage.Animate ) );
 		view.AddSeparator();
-		view.AddOption( "Toggle Guides", "aspect_ratio", () =>
+		var guides = view.AddOption( "Toggle Guides", "aspect_ratio", () =>
 			_controller.Mutate( "Viewport guides", d => d.Workspace.ShowGuides = !d.Workspace.ShowGuides ) );
-		view.AddOption( "Toggle Skeleton", "accessibility_new", () =>
+		BindCheckedState( guides, () => _controller.Document.Workspace.ShowGuides );
+		var skeleton = view.AddOption( "Toggle Skeleton", "accessibility_new", () =>
 			_controller.Mutate( "Skeleton overlay", d => d.Workspace.ShowSkeleton = !d.Workspace.ShowSkeleton ) );
-		view.AddOption( "X-Ray Skeleton", "visibility", () =>
+		BindCheckedState( skeleton, () => _controller.Document.Workspace.ShowSkeleton );
+		var xray = view.AddOption( "X-Ray Skeleton", "visibility", () =>
 			_controller.UpdateWorkspacePreference(
 				"X-ray skeleton",
 				workspace => workspace.XRaySkeleton = !workspace.XRaySkeleton ) );
+		BindCheckedState( xray, () => _controller.Document.Workspace.XRaySkeleton );
 		var boneOcclusion = view.AddOption( "Bone Occlusion", "gradient", () =>
 			_controller.UpdateWorkspacePreference(
 				"Bone occlusion",
 				workspace => workspace.BoneOcclusionEnabled =
 					!workspace.BoneOcclusionEnabled ) );
-		boneOcclusion.Checkable = true;
-		boneOcclusion.Checked = _controller.Document.Workspace.BoneOcclusionEnabled;
-		boneOcclusion.FetchCheckedState =
-			() => _controller.Document.Workspace.BoneOcclusionEnabled;
-		view.AddOption( "Show IK Bones", "polyline", () =>
+		BindCheckedState(
+			boneOcclusion,
+			() => _controller.Document.Workspace.BoneOcclusionEnabled );
+		var ikBones = view.AddOption( "Show IK Bones", "polyline", () =>
 			_controller.UpdateWorkspacePreference(
 				"Show IK bones",
 				workspace => workspace.ShowIkBones = !workspace.ShowIkBones ) );
-		view.AddOption( "Toggle Onion Skins", "filter_none", () =>
+		BindCheckedState( ikBones, () => _controller.Document.Workspace.ShowIkBones );
+		var onionSkins = view.AddOption( "Toggle Onion Skins", "filter_none", () =>
 			_controller.Mutate( "Onion skins", d => d.Workspace.ShowOnionSkins = !d.Workspace.ShowOnionSkins ) );
-		view.AddOption( "Viewmodel Camera Preview", "videocam", () =>
+		BindCheckedState(
+			onionSkins,
+			() => _controller.Document.Workspace.ShowOnionSkins );
+		var cameraPreview = view.AddOption( "Viewmodel Camera Preview", "videocam", () =>
 			_controller.Mutate(
 				"Preview camera",
 				d => d.Workspace.FirstPersonPreview = !d.Workspace.FirstPersonPreview ) );
+		BindCheckedState(
+			cameraPreview,
+			() => _controller.Document.Workspace.FirstPersonPreview );
 		view.AddSeparator();
 		view.AddOption( "Reset Workspace", "restart_alt", ResetWorkspace );
 
@@ -260,6 +269,13 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		tools.AddOption( "Reimport Source", "published_with_changes", ReimportSource );
 		tools.AddOption( "Refresh Materials", "texture", RefreshMaterials );
 		tools.AddOption( "Open Generated Folder", "folder", OpenGeneratedFolder );
+	}
+
+	private static void BindCheckedState( Option option, Func<bool> fetch )
+	{
+		option.Checkable = true;
+		option.Checked = fetch();
+		option.FetchCheckedState = fetch;
 	}
 
 	private void BuildWorkspace()
