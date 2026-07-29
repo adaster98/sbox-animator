@@ -51,6 +51,19 @@ internal readonly record struct ViewportRimLightStyle(
 	}
 }
 
+internal readonly record struct SkeletonOverlayStyle(
+	bool DrawOccludedPass,
+	float OccludedAlpha )
+{
+	public static SkeletonOverlayStyle Resolve( bool xray, float baseAlpha )
+	{
+		var safe = WeaponAnimationMath.IsFinite( baseAlpha )
+			? Math.Clamp( baseAlpha, 0, 1 )
+			: 1.0f;
+		return new SkeletonOverlayStyle( xray && safe > 0.001f, safe * 0.28f );
+	}
+}
+
 internal readonly record struct ArmPreviewVisualStyle(
 	bool UseFlatMaterial,
 	Color Tint )
@@ -1034,7 +1047,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		DrawMeasurement();
 		DrawAnchors();
 		if ( document.Workspace.ShowSkeleton )
-			DrawRendererSkeleton( _sourceRenderer, WeaponAnimatorTheme.Amber );
+			DrawRendererSkeleton( _sourceRenderer, WeaponAnimatorTheme.Amber, allowXray: true );
 
 		// Calibration only ever poses the weapon as a whole, plus its anchors. Selecting a bone
 		// no longer suppresses the rig gizmo, which previously left the page with no gizmo at all.
@@ -1073,7 +1086,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		document.Binding.SupportHand.Reachable = pose.SupportReachable;
 		DrawGripTethers( pose );
 		if ( document.Workspace.ShowSkeleton )
-			DrawHostSkeleton( pose, 1.0f, useRenderedArms: true );
+			DrawHostSkeleton( pose, 1.0f, useRenderedArms: true, allowXray: true );
 		if ( document.Workspace.ShowOnionSkins && clip is not null )
 			DrawOnionSkins( clip );
 		DrawAnimationControl();
@@ -1413,11 +1426,40 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				"weapon_root" ) is not null}." );
 	}
 
-	private void DrawRendererSkeleton( SkinnedModelRenderer? renderer, Color color )
+	private void DrawRendererSkeleton(
+		SkinnedModelRenderer? renderer,
+		Color color,
+		bool allowXray = false )
 	{
 		if ( !renderer.IsValid() || renderer!.Model is null )
 			return;
 
+		var style = SkeletonOverlayStyle.Resolve(
+			allowXray && _controller.Document.Workspace.XRaySkeleton,
+			1.0f );
+
+		using ( Gizmo.Scope( "source_skeleton" ) )
+			DrawRendererSkeletonPass( renderer, color, 1.0f );
+
+		if ( !style.DrawOccludedPass )
+			return;
+
+		// Hit testing ignores depth, so bones behind the mesh are already clickable. Ghost them in
+		// so the overlay stops hiding its own targets. Depth state is set once per pass because
+		// changing it mid-loop breaks gizmo vertex batching.
+		using ( Gizmo.Scope( "source_skeleton_xray" ) )
+		{
+			Gizmo.Draw.IgnoreDepth = true;
+			Gizmo.Hitbox.CanInteract = false;
+			DrawRendererSkeletonPass( renderer, color, style.OccludedAlpha );
+		}
+	}
+
+	private void DrawRendererSkeletonPass(
+		SkinnedModelRenderer renderer,
+		Color color,
+		float alpha )
+	{
 		foreach ( var bone in renderer.Model.Bones.AllBones )
 		{
 			if ( !renderer.TryGetBoneTransform( bone, out var transform ) )
@@ -1426,14 +1468,14 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			if ( bone.Parent is not null
 				&& renderer.TryGetBoneTransform( bone.Parent, out var parent ) )
 			{
-				Gizmo.Draw.Color = color.WithAlpha( 0.55f );
+				Gizmo.Draw.Color = color.WithAlpha( 0.55f * alpha );
 				Gizmo.Draw.Line( parent.Position, transform.Position );
 			}
 
 			using var scope = Gizmo.Scope( $"source_bone:{bone.Name}", transform );
 			var selected = bone.Name == _controller.Document.Workspace.SelectedBone;
 			var radius = Math.Clamp( transform.Position.Distance( _camera.WorldPosition ) / 150.0f, 0.1f, 0.7f );
-			Gizmo.Draw.Color = selected ? Color.White : color;
+			Gizmo.Draw.Color = (selected ? Color.White : color).WithAlpha( alpha );
 			Gizmo.Draw.SolidSphere( Vector3.Zero, selected ? radius * 0.7f : radius * 0.35f, 6, 4 );
 			Gizmo.Hitbox.DepthBias = 0.01f;
 			Gizmo.Hitbox.Sphere( new Sphere( Vector3.Zero, radius ) );
@@ -1449,12 +1491,39 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private void DrawHostSkeleton(
 		EvaluatedPose pose,
 		float alpha,
-		bool useRenderedArms = false )
+		bool useRenderedArms = false,
+		bool allowXray = false )
 	{
 		if ( _hostSkeleton is null )
 			return;
 
-		foreach ( var bone in _hostSkeleton.Bones )
+		var style = SkeletonOverlayStyle.Resolve(
+			allowXray && _controller.Document.Workspace.XRaySkeleton,
+			alpha );
+
+		using ( Gizmo.Scope( "host_skeleton" ) )
+			DrawHostSkeletonPass( pose, alpha, useRenderedArms );
+
+		if ( !style.DrawOccludedPass )
+			return;
+
+		// Hit testing ignores depth, so bones behind the arms are already clickable. Ghost them in
+		// so the overlay stops hiding its own targets. Depth state is set once per pass because
+		// changing it mid-loop breaks gizmo vertex batching.
+		using ( Gizmo.Scope( "host_skeleton_xray" ) )
+		{
+			Gizmo.Draw.IgnoreDepth = true;
+			Gizmo.Hitbox.CanInteract = false;
+			DrawHostSkeletonPass( pose, style.OccludedAlpha, useRenderedArms );
+		}
+	}
+
+	private void DrawHostSkeletonPass(
+		EvaluatedPose pose,
+		float alpha,
+		bool useRenderedArms )
+	{
+		foreach ( var bone in _hostSkeleton!.Bones )
 		{
 			if ( !TryGetDisplayedBoneTransform(
 				pose,
@@ -1508,6 +1577,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		if ( _hostSkeleton is null )
 			return;
 		var step = 1.0f / MathF.Max( clip.SampleRate, 1 );
+
+		// Onion skins are context only. They share bone names with the live skeleton, so leaving
+		// them interactive would put duplicate hit targets on neighbouring frames.
+		using var scope = Gizmo.Scope( "onion_skins" );
+		Gizmo.Hitbox.CanInteract = false;
 		foreach ( var offset in new[] { -step, step } )
 		{
 			var time = Math.Clamp(

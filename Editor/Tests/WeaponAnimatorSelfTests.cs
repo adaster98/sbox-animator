@@ -249,6 +249,41 @@ public static class WeaponAnimatorSelfTests
 			report,
 			!ArmPreviewVisualStyle.Resolve( WeaponAnimatorStage.Animate, false ).UseFlatMaterial,
 			"Lit animation preview must preserve the production arms materials." );
+		var xrayStyle = SkeletonOverlayStyle.Resolve( true, 1.0f );
+		Check(
+			report,
+			document.Workspace.XRaySkeleton,
+			"Bones hidden behind the arms must be visible by default." );
+		Check(
+			report,
+			xrayStyle.DrawOccludedPass
+				&& xrayStyle.OccludedAlpha > 0
+				&& xrayStyle.OccludedAlpha < 1.0f,
+			"Occluded bones must stay visible but subordinate to unoccluded ones." );
+		Check(
+			report,
+			!SkeletonOverlayStyle.Resolve( false, 1.0f ).DrawOccludedPass,
+			"Disabling x-ray must restore the depth-tested skeleton overlay." );
+		Check(
+			report,
+			!SkeletonOverlayStyle.Resolve( true, 0 ).DrawOccludedPass,
+			"A fully faded skeleton must not cost a second overlay pass." );
+		Check(
+			report,
+			SkeletonOverlayStyle.Resolve( true, 0.18f ).OccludedAlpha < xrayStyle.OccludedAlpha,
+			"Fainter skeleton passes must produce proportionally fainter ghosts." );
+		Near(
+			report,
+			xrayStyle.OccludedAlpha,
+			SkeletonOverlayStyle.Resolve( true, 99.0f ).OccludedAlpha,
+			0.0001f,
+			"Overlay alpha must remain inside its supported range." );
+		Near(
+			report,
+			xrayStyle.OccludedAlpha,
+			SkeletonOverlayStyle.Resolve( true, float.NaN ).OccludedAlpha,
+			0.0001f,
+			"A non-finite overlay alpha must fall back to the default." );
 
 		var first = WeaponAnimationClip.Create( WeaponClipRole.Custom );
 		var second = WeaponAnimationClip.Create( WeaponClipRole.Custom );

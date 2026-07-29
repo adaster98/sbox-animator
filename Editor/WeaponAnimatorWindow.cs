@@ -227,6 +227,10 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			_controller.Mutate( "Viewport guides", d => d.Workspace.ShowGuides = !d.Workspace.ShowGuides ) );
 		view.AddOption( "Toggle Skeleton", "accessibility_new", () =>
 			_controller.Mutate( "Skeleton overlay", d => d.Workspace.ShowSkeleton = !d.Workspace.ShowSkeleton ) );
+		view.AddOption( "X-Ray Skeleton", "visibility", () =>
+			_controller.UpdateWorkspacePreference(
+				"X-ray skeleton",
+				workspace => workspace.XRaySkeleton = !workspace.XRaySkeleton ) );
 		view.AddOption( "Toggle Onion Skins", "filter_none", () =>
 			_controller.Mutate( "Onion skins", d => d.Workspace.ShowOnionSkins = !d.Workspace.ShowOnionSkins ) );
 		view.AddOption( "Viewmodel Camera Preview", "videocam", () =>
