@@ -31,7 +31,7 @@ The workspace is independent of the normal scene editor. Opening or closing it d
 Clone or download this repository into your S&box project's library folder:
 
 ```text
-<your-project>/Libraries/asterw.sbox-animator/
+<your-project>/Libraries/sonac.sbox-animator/
 ```
 
 Open or reload the project and allow S&box to compile the library.
