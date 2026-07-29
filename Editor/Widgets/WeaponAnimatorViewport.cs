@@ -134,15 +134,102 @@ internal readonly record struct SkeletonBoneStyle(
 }
 
 internal readonly record struct SkeletonOverlayStyle(
-	bool DrawOccludedPass,
+	bool DrawThroughMeshes,
+	float VisibleAlpha,
 	float OccludedAlpha )
 {
+	/// <summary>
+	/// Occluded bones use smaller marks so they stay readable without competing with visible bones.
+	/// </summary>
+	public const float OccludedDotScale = 0.55f;
+	public const float OccludedLineThickness = 0.6f;
+	public const int OcclusionGradientSegments = 10;
+
+	/// <summary>
+	/// Pushes an occluded bone most of the way to grey. Hue carries depth along the arm chain, so
+	/// draining it is what makes "behind something" read as a different category rather than just a
+	/// dimmer version of the same thing. A little colour is left so weapon and arm stay tellable.
+	/// </summary>
+	public static Color Occlude( Color color )
+	{
+		var luminance = (color.r * 0.299f) + (color.g * 0.587f) + (color.b * 0.114f);
+		return Color.Lerp(
+			color,
+			new Color( luminance, luminance, luminance, color.a ),
+			0.8f );
+	}
+
+	public static float OcclusionDepthClearance( float cameraDistance )
+	{
+		var safeDistance = WeaponAnimationMath.IsFinite( cameraDistance )
+			? MathF.Max( cameraDistance, 0 )
+			: 0;
+		var markerRadius = Math.Clamp( safeDistance / 180.0f, 0.08f, 0.45f );
+		return MathF.Max( markerRadius * 0.35f, 0.05f );
+	}
+
+	public static bool IsOccludingDepth(
+		float targetDistance,
+		float hitDistance )
+	{
+		return WeaponAnimationMath.IsFinite( targetDistance )
+			&& WeaponAnimationMath.IsFinite( hitDistance )
+			&& targetDistance - hitDistance > OcclusionDepthClearance( targetDistance );
+	}
+
 	public static SkeletonOverlayStyle Resolve( bool xray, float baseAlpha )
 	{
 		var safe = WeaponAnimationMath.IsFinite( baseAlpha )
 			? Math.Clamp( baseAlpha, 0, 1 )
 			: 1.0f;
-		return new SkeletonOverlayStyle( xray && safe > 0.001f, safe * 0.28f );
+		return new SkeletonOverlayStyle(
+			xray && safe > 0.001f,
+			safe,
+			safe * 0.28f );
+	}
+
+	public SkeletonLineVisual ResolveLineVisual(
+		SkeletonBoneStyle bone,
+		bool occluded )
+	{
+		var color = occluded ? Occlude( bone.Color ) : bone.Color;
+		var alpha = (occluded ? OccludedAlpha : VisibleAlpha)
+			* bone.AlphaScale
+			* 0.45f;
+		return new SkeletonLineVisual(
+			color.WithAlpha( alpha ),
+			occluded ? OccludedLineThickness : 1.0f );
+	}
+}
+
+internal readonly record struct SkeletonLineVisual(
+	Color Color,
+	float Thickness )
+{
+	public static SkeletonLineVisual Lerp(
+		SkeletonLineVisual start,
+		SkeletonLineVisual end,
+		float fraction )
+	{
+		var t = WeaponAnimationMath.IsFinite( fraction )
+			? Math.Clamp( fraction, 0, 1 )
+			: 0;
+		return new SkeletonLineVisual(
+			Color.Lerp( start.Color, end.Color, t ),
+			start.Thickness + ((end.Thickness - start.Thickness) * t) );
+	}
+}
+
+internal static class SkeletonOcclusionPolicy
+{
+	public static bool IsOccludedByArm(
+		bool targetIsWeaponBone,
+		int targetArmSide,
+		int hitArmSide )
+	{
+		return hitArmSide != 0
+			&& (targetIsWeaponBone
+				|| (targetArmSide != 0 && targetArmSide != hitArmSide));
 	}
 }
 
@@ -273,6 +360,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 {
 	private const int LegacyIdleRepairVersion = 3;
 	private const float ScaleGizmoSensitivity = 0.005f;
+	private const string ArmsOccluderTag = "weaponanim_arms_occluder";
 	private static readonly float[] RotationSnapSteps =
 		[0.25f, 0.5f, 1, 5, 15, 30, 45, 90, 180];
 	private Rect TransformReadoutRect =>
@@ -293,11 +381,21 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private string _transformModeText = "";
 	private SkinnedModelRenderer? _sourceRenderer;
 	private SkinnedModelRenderer? _armsRenderer;
+	private ModelHitboxes? _armsHitboxes;
 	private SkinnedModelRenderer? _hostRenderer;
 	private HostSkeleton? _hostSkeleton;
 	private HostSkeleton? _boneDepthSource;
 	private readonly Dictionary<string, int> _boneDepths =
 		new( StringComparer.OrdinalIgnoreCase );
+	private readonly Dictionary<string, Transform> _occlusionPose =
+		new( StringComparer.OrdinalIgnoreCase );
+	private readonly HashSet<string> _occludedBones =
+		new( StringComparer.OrdinalIgnoreCase );
+	private Transform _occlusionCameraTransform;
+	private bool _occlusionCacheValid;
+	private bool _occlusionFollowupPending;
+	private string _lastOcclusionDiagnostic = "";
+	private RealTimeSince _sinceOcclusionTrace = 99;
 	private int _maxBoneDepth;
 	private string _loadedSource = "";
 	private string _loadedHost = "";
@@ -474,8 +572,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		Scene = null;
 		_sourceRenderer = null;
 		_armsRenderer = null;
+		_armsHitboxes = null;
 		_hostRenderer = null;
 		_hostSkeleton = null;
+		_occlusionCacheValid = false;
 	}
 
 	public void TogglePlayback()
@@ -722,6 +822,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		if ( !Scene.IsValid() )
 			return;
 
+		_occlusionCacheValid = false;
 		using ( Scene.Push() )
 		{
 			_sourceRenderer?.GameObject.Destroy();
@@ -729,6 +830,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			_hostRenderer?.GameObject.Destroy();
 			_sourceRenderer = null;
 			_armsRenderer = null;
+			_armsHitboxes = null;
 			_hostRenderer = null;
 			_hostSkeleton = null;
 			_loadedSource = "";
@@ -747,8 +849,8 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				var sourceModel = Model.Load( document.Source.CompiledModelPath );
 				if ( sourceModel is not null && !sourceModel.IsError )
 				{
-					_sourceRenderer = new GameObject( true, "source_weapon_preview" )
-						.GetOrAddComponent<SkinnedModelRenderer>( false );
+					var sourceObject = new GameObject( true, "source_weapon_preview" );
+					_sourceRenderer = sourceObject.GetOrAddComponent<SkinnedModelRenderer>( false );
 					_sourceRenderer.Model = sourceModel;
 					_sourceRenderer.Enabled = true;
 					ModelDimensionsChanged?.Invoke( sourceModel.Bounds.Size );
@@ -767,11 +869,16 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				armsModel = HostSkeletonBuilder.LoadArmProfile();
 			if ( armsModel is not null && !armsModel.IsError )
 			{
-				_armsRenderer = new GameObject( true, "facepunch_arms_preview" )
-					.GetOrAddComponent<SkinnedModelRenderer>( false );
+				var armsObject = new GameObject( true, "facepunch_arms_preview" );
+				armsObject.Tags.Add( ArmsOccluderTag );
+				_armsRenderer = armsObject.GetOrAddComponent<SkinnedModelRenderer>( false );
 				_armsRenderer.Model = armsModel;
 				_armsRenderer.Enabled = true;
 				_armsRenderer.Tint = new Color( 0.42f, 0.84f, 0.92f, 0.42f );
+				_armsHitboxes = armsObject.GetOrAddComponent<ModelHitboxes>( false );
+				_armsHitboxes.Renderer = _armsRenderer;
+				_armsHitboxes.Target = armsObject;
+				_armsHitboxes.Enabled = true;
 			}
 
 			if ( document.ActiveStage == WeaponAnimatorStage.Animate
@@ -958,6 +1065,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 	private void OnDocumentChanged()
 	{
+		_occlusionCacheValid = false;
 		RefreshTransformOverlay();
 		RefreshViewportCameraButtons();
 		var document = _controller.Document;
@@ -1493,6 +1601,8 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 	private void OnSelectionChanged()
 	{
+		_occlusionCacheValid = false;
+		_lastOcclusionDiagnostic = "";
 		Update();
 		if ( _controller.Document.ActiveStage != WeaponAnimatorStage.Animate )
 			return;
@@ -1530,19 +1640,9 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			1.0f );
 
 		using ( Gizmo.Scope( "source_skeleton" ) )
-			DrawRendererSkeletonPass( renderer, color, 1.0f );
-
-		if ( !style.DrawOccludedPass )
-			return;
-
-		// Hit testing ignores depth, so bones behind the mesh are already clickable. Ghost them in
-		// so the overlay stops hiding its own targets. Depth state is set once per pass because
-		// changing it mid-loop breaks gizmo vertex batching.
-		using ( Gizmo.Scope( "source_skeleton_xray" ) )
 		{
-			Gizmo.Draw.IgnoreDepth = true;
-			Gizmo.Hitbox.CanInteract = false;
-			DrawRendererSkeletonPass( renderer, color, style.OccludedAlpha );
+			Gizmo.Draw.IgnoreDepth = style.DrawThroughMeshes;
+			DrawRendererSkeletonPass( renderer, color, 1.0f );
 		}
 	}
 
@@ -1567,7 +1667,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			var selected = bone.Name == _controller.Document.Workspace.SelectedBone;
 			var radius = Math.Clamp( transform.Position.Distance( _camera.WorldPosition ) / 150.0f, 0.1f, 0.7f );
 			Gizmo.Draw.Color = (selected ? Color.White : color).WithAlpha( alpha );
-			Gizmo.Draw.SolidSphere( Vector3.Zero, selected ? radius * 0.7f : radius * 0.35f, 6, 4 );
+			Gizmo.Draw.SolidSphere(
+				Vector3.Zero,
+				selected ? radius * 0.7f : radius * 0.35f,
+				6,
+				4 );
 			Gizmo.Hitbox.DepthBias = 0.01f;
 			Gizmo.Hitbox.Sphere( new Sphere( Vector3.Zero, radius ) );
 			if ( Gizmo.IsHovered )
@@ -1593,21 +1697,229 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			allowXray && _controller.Document.Workspace.XRaySkeleton,
 			alpha );
 
-		using ( Gizmo.Scope( "host_skeleton" ) )
-			DrawHostSkeletonPass( pose, alpha, useRenderedArms );
+		var occludedBones = style.DrawThroughMeshes
+			&& _controller.Document.Workspace.BoneOcclusionEnabled
+			? ResolveOccludedBones( pose, useRenderedArms )
+			: null;
+		if ( occludedBones is { Count: > 0 } )
+		{
+			DrawMixedOcclusionLines(
+				pose,
+				useRenderedArms,
+				occludedBones,
+				style );
+			using ( Gizmo.Scope( "host_skeleton_behind" ) )
+			{
+				Gizmo.Draw.IgnoreDepth = true;
+				Gizmo.Draw.LineThickness = SkeletonOverlayStyle.OccludedLineThickness;
+				DrawHostSkeletonPass(
+					pose,
+					style.OccludedAlpha,
+					useRenderedArms,
+					occluded: true,
+					onlyBones: occludedBones,
+					occlusionStates: occludedBones );
+			}
+		}
 
-		if ( !style.DrawOccludedPass )
+		using ( Gizmo.Scope( "host_skeleton" ) )
+		{
+			Gizmo.Draw.IgnoreDepth = style.DrawThroughMeshes;
+			DrawHostSkeletonPass(
+				pose,
+				alpha,
+				useRenderedArms,
+				excludedBones: occludedBones,
+				occlusionStates: occludedBones );
+		}
+	}
+
+	private IReadOnlySet<string> ResolveOccludedBones(
+		EvaluatedPose pose,
+		bool useRenderedArms )
+	{
+		var samples = new List<(HostBone Bone, Transform Transform)>();
+		var showIk = _controller.Document.Workspace.ShowIkBones;
+		foreach ( var bone in _hostSkeleton!.Bones )
+		{
+			if ((SkeletonBoneStyle.Classify( bone ) == SkeletonBoneKind.Ik && !showIk)
+				|| !TryGetDisplayedBoneTransform(
+					pose,
+					bone,
+					useRenderedArms,
+					out var transform ) )
+				continue;
+
+			samples.Add( (bone, transform) );
+		}
+
+		var cacheMatches = OcclusionCacheMatches( samples );
+		if ( cacheMatches && !_occlusionFollowupPending )
+			return _occludedBones;
+		if ( !cacheMatches
+			&& _occlusionCacheValid
+			&& _sinceOcclusionTrace < (1.0f / 30.0f) )
+			return _occludedBones;
+
+		var completingFollowup = cacheMatches && _occlusionFollowupPending;
+		_occlusionPose.Clear();
+		_occludedBones.Clear();
+		_occlusionCameraTransform = _camera.WorldTransform;
+		_sinceOcclusionTrace = 0;
+		foreach ( var sample in samples )
+		{
+			_occlusionPose[sample.Bone.Name] = sample.Transform;
+			var occluded = IsBoneOccluded(
+				sample.Bone,
+				sample.Transform.Position,
+				out var hitDescription );
+			if ( occluded )
+				_occludedBones.Add( sample.Bone.Name );
+
+			if ( sample.Bone.Name.Equals(
+				_controller.Document.Workspace.SelectedBone,
+				StringComparison.OrdinalIgnoreCase ) )
+				ReportOcclusionDiagnostic(
+					sample.Bone,
+					hitDescription,
+					occluded );
+		}
+
+		_occlusionCacheValid = true;
+		_occlusionFollowupPending = !completingFollowup;
+		return _occludedBones;
+	}
+
+	private bool OcclusionCacheMatches(
+		IReadOnlyList<(HostBone Bone, Transform Transform)> samples )
+	{
+		if ( !_occlusionCacheValid
+			|| samples.Count != _occlusionPose.Count
+			|| !WeaponPoseProjection.TransformNear(
+				_occlusionCameraTransform,
+				_camera.WorldTransform,
+				0.0005f ) )
+			return false;
+
+		foreach ( var sample in samples )
+		{
+			if ( !_occlusionPose.TryGetValue( sample.Bone.Name, out var cached )
+				|| !WeaponPoseProjection.TransformNear(
+					cached,
+					sample.Transform,
+					0.0005f ) )
+				return false;
+		}
+
+		return true;
+	}
+
+	private bool IsBoneOccluded(
+		HostBone target,
+		Vector3 targetPosition,
+		out string description )
+	{
+		description = "none";
+		if ( !Scene.IsValid()
+			|| targetPosition.Distance( _camera.WorldPosition ) <= 0.001f )
+			return false;
+
+		var targetDistance = targetPosition.Distance( _camera.WorldPosition );
+		var depthClearance = SkeletonOverlayStyle.OcclusionDepthClearance( targetDistance );
+		var nearestDistance = float.MaxValue;
+		var sameArmHits = 0;
+		var oppositeArmHits = 0;
+		var nearArmHits = 0;
+		var unknownArmHits = 0;
+		var sameArmExample = "";
+		var unknownArmExample = "";
+
+		var armTraces = Scene.Trace
+			.Ray( _camera.WorldPosition, targetPosition )
+			.WithTag( ArmsOccluderTag )
+			.UseRenderMeshes( false )
+			.UseHitboxes( true )
+			.UsePhysicsWorld( false )
+			.UseHitPosition( true )
+			.RunAll();
+		foreach ( var armTrace in armTraces )
+		{
+			var hitBoneName = ResolveArmHitBoneName( armTrace );
+			var hitSide = !string.IsNullOrWhiteSpace( hitBoneName )
+				&& _hostSkeleton!.ByName.TryGetValue( hitBoneName, out var hitBone )
+					? hitBone.ArmSide
+					: 0;
+			if ( !SkeletonOcclusionPolicy.IsOccludedByArm(
+				target.IsWeaponBone,
+				target.ArmSide,
+				hitSide ) )
+			{
+				if ( hitSide == target.ArmSide && hitSide != 0 )
+				{
+					sameArmHits++;
+					if ( string.IsNullOrWhiteSpace( sameArmExample ) )
+						sameArmExample = hitBoneName;
+				}
+				else
+				{
+					unknownArmHits++;
+					if ( string.IsNullOrWhiteSpace( unknownArmExample ) )
+						unknownArmExample = hitBoneName;
+				}
+				continue;
+			}
+
+			var gap = targetDistance - armTrace.Distance;
+			if ( !SkeletonOverlayStyle.IsOccludingDepth(
+				targetDistance,
+				armTrace.Distance ) )
+			{
+				nearArmHits++;
+				continue;
+			}
+
+			oppositeArmHits++;
+			if ( armTrace.Distance >= nearestDistance )
+				continue;
+
+			nearestDistance = armTrace.Distance;
+			description = string.IsNullOrWhiteSpace( hitBoneName )
+				? $"arms hitbox (unknown bone) at {armTrace.Distance:0.###}"
+				: $"arms hitbox ({hitBoneName}) at {armTrace.Distance:0.###}";
+		}
+
+		description +=
+			$"; armHits=opposite:{oppositeArmHits},self:{sameArmHits}"
+			+ $"({sameArmExample}),near:{nearArmHits},unknown:{unknownArmHits}"
+			+ $"({unknownArmExample}); target={targetDistance:0.###},"
+			+ $"clearance={depthClearance:0.###},weaponIgnored=True";
+		return nearestDistance < float.MaxValue;
+	}
+
+	private string ResolveArmHitBoneName( SceneTraceResult trace )
+	{
+		var hitboxBoneName = trace.Hitbox?.Bone?.Name;
+		if ( !string.IsNullOrWhiteSpace( hitboxBoneName ) )
+			return hitboxBoneName;
+		if ( trace.Bone >= 0 && _armsRenderer.IsValid() )
+			return _armsRenderer!.Model.GetBoneName( trace.Bone );
+		return "";
+	}
+
+	private void ReportOcclusionDiagnostic(
+		HostBone target,
+		string hitDescription,
+		bool occluded )
+	{
+		var diagnostic = $"{target.Name}|{target.ArmSide}|{occluded}";
+		if ( diagnostic.Equals( _lastOcclusionDiagnostic, StringComparison.Ordinal ) )
 			return;
 
-		// Hit testing ignores depth, so bones behind the arms are already clickable. Ghost them in
-		// so the overlay stops hiding its own targets. Depth state is set once per pass because
-		// changing it mid-loop breaks gizmo vertex batching.
-		using ( Gizmo.Scope( "host_skeleton_xray" ) )
-		{
-			Gizmo.Draw.IgnoreDepth = true;
-			Gizmo.Hitbox.CanInteract = false;
-			DrawHostSkeletonPass( pose, style.OccludedAlpha, useRenderedArms );
-		}
+		_lastOcclusionDiagnostic = diagnostic;
+		Log.Info(
+			$"[Weapon Animator] X-ray diagnostic: target={target.Name}, "
+			+ $"targetSide={target.ArmSide}, firstHit={hitDescription}, "
+			+ $"reduced={occluded}." );
 	}
 
 	/// <summary>
@@ -1642,11 +1954,20 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private void DrawHostSkeletonPass(
 		EvaluatedPose pose,
 		float alpha,
-		bool useRenderedArms )
+		bool useRenderedArms,
+		bool occluded = false,
+		IReadOnlySet<string>? onlyBones = null,
+		IReadOnlySet<string>? excludedBones = null,
+		IReadOnlySet<string>? occlusionStates = null )
 	{
 		var showIk = _controller.Document.Workspace.ShowIkBones;
 		foreach ( var bone in _hostSkeleton!.Bones )
 		{
+			if ( onlyBones is not null && !onlyBones.Contains( bone.Name ) )
+				continue;
+			if ( excludedBones is not null && excludedBones.Contains( bone.Name ) )
+				continue;
+
 			if ( !TryGetDisplayedBoneTransform(
 				pose,
 				bone,
@@ -1663,8 +1984,11 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			if ( !boneStyle.Visible )
 				continue;
 
-			var color = boneStyle.Color;
+			var color = occluded
+				? SkeletonOverlayStyle.Occlude( boneStyle.Color )
+				: boneStyle.Color;
 			var boneAlpha = alpha * boneStyle.AlphaScale;
+			var dotScale = occluded ? SkeletonOverlayStyle.OccludedDotScale : 1.0f;
 			if ( !string.IsNullOrWhiteSpace( bone.ParentName )
 				&& _hostSkeleton.ByName.TryGetValue( bone.ParentName, out var parentBone )
 				&& TryGetDisplayedBoneTransform(
@@ -1673,8 +1997,13 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					useRenderedArms,
 					out var parent ) )
 			{
-				Gizmo.Draw.Color = color.WithAlpha( 0.45f * boneAlpha );
-				Gizmo.Draw.Line( parent.Position, transform.Position );
+				var parentOccluded = occlusionStates?.Contains( parentBone.Name )
+					?? occluded;
+				if ( parentOccluded == occluded )
+				{
+					Gizmo.Draw.Color = color.WithAlpha( 0.45f * boneAlpha );
+					Gizmo.Draw.Line( parent.Position, transform.Position );
+				}
 			}
 
 			using var scope = Gizmo.Scope( $"host_bone:{bone.Name}", transform );
@@ -1683,12 +2012,86 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				* boneStyle.RadiusScale;
 			Gizmo.Draw.Color = (selected ? Color.White : color).WithAlpha( boneAlpha );
 			if ( boneStyle.Hollow )
-				Gizmo.Draw.LineSphere( 0, selected ? radius * 0.7f : radius * 0.45f, 3 );
+				Gizmo.Draw.LineSphere( 0, (selected ? radius * 0.7f : radius * 0.45f) * dotScale, 3 );
 			else
-				Gizmo.Draw.SolidSphere( 0, selected ? radius * 0.7f : radius * 0.3f, 5, 4 );
+				Gizmo.Draw.SolidSphere( 0, (selected ? radius * 0.7f : radius * 0.3f) * dotScale, 5, 4 );
 			Gizmo.Hitbox.Sphere( new Sphere( 0, radius ) );
 			if ( Gizmo.IsHovered && Gizmo.WasLeftMousePressed )
 				_controller.SelectBone( bone.Name );
+		}
+	}
+
+	private void DrawMixedOcclusionLines(
+		EvaluatedPose pose,
+		bool useRenderedArms,
+		IReadOnlySet<string> occludedBones,
+		SkeletonOverlayStyle overlay )
+	{
+		var showIk = _controller.Document.Workspace.ShowIkBones;
+		using var scope = Gizmo.Scope( "host_skeleton_occlusion_gradients" );
+		Gizmo.Draw.IgnoreDepth = true;
+		foreach ( var bone in _hostSkeleton!.Bones )
+		{
+			if ( string.IsNullOrWhiteSpace( bone.ParentName )
+				|| !_hostSkeleton.ByName.TryGetValue( bone.ParentName, out var parentBone ) )
+				continue;
+
+			var boneOccluded = occludedBones.Contains( bone.Name );
+			var parentOccluded = occludedBones.Contains( parentBone.Name );
+			if ( boneOccluded == parentOccluded )
+				continue;
+
+			var boneStyle = SkeletonBoneStyle.Resolve(
+				SkeletonBoneStyle.Classify( bone ),
+				_boneDepths.GetValueOrDefault( bone.Name ),
+				_maxBoneDepth,
+				showIk );
+			if ( !boneStyle.Visible )
+				continue;
+
+			var parentStyle = SkeletonBoneStyle.Resolve(
+				SkeletonBoneStyle.Classify( parentBone ),
+				_boneDepths.GetValueOrDefault( parentBone.Name ),
+				_maxBoneDepth,
+				showIk );
+			if ( !parentStyle.Visible
+				|| !TryGetDisplayedBoneTransform(
+					pose,
+					bone,
+					useRenderedArms,
+					out var boneTransform )
+				|| !TryGetDisplayedBoneTransform(
+					pose,
+					parentBone,
+					useRenderedArms,
+					out var parentTransform ) )
+				continue;
+
+			var startVisual = overlay.ResolveLineVisual(
+				parentStyle,
+				parentOccluded );
+			var endVisual = overlay.ResolveLineVisual(
+				boneStyle,
+				boneOccluded );
+			var delta = boneTransform.Position - parentTransform.Position;
+			for ( var segment = 0;
+				segment < SkeletonOverlayStyle.OcclusionGradientSegments;
+				segment++ )
+			{
+				var startFraction =
+					segment / (float)SkeletonOverlayStyle.OcclusionGradientSegments;
+				var endFraction =
+					(segment + 1) / (float)SkeletonOverlayStyle.OcclusionGradientSegments;
+				var visual = SkeletonLineVisual.Lerp(
+					startVisual,
+					endVisual,
+					(startFraction + endFraction) * 0.5f );
+				Gizmo.Draw.Color = visual.Color;
+				Gizmo.Draw.LineThickness = visual.Thickness;
+				Gizmo.Draw.Line(
+					parentTransform.Position + (delta * startFraction),
+					parentTransform.Position + (delta * endFraction) );
+			}
 		}
 	}
 

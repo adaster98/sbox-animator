@@ -232,6 +232,15 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			_controller.UpdateWorkspacePreference(
 				"X-ray skeleton",
 				workspace => workspace.XRaySkeleton = !workspace.XRaySkeleton ) );
+		var boneOcclusion = view.AddOption( "Bone Occlusion", "gradient", () =>
+			_controller.UpdateWorkspacePreference(
+				"Bone occlusion",
+				workspace => workspace.BoneOcclusionEnabled =
+					!workspace.BoneOcclusionEnabled ) );
+		boneOcclusion.Checkable = true;
+		boneOcclusion.Checked = _controller.Document.Workspace.BoneOcclusionEnabled;
+		boneOcclusion.FetchCheckedState =
+			() => _controller.Document.Workspace.BoneOcclusionEnabled;
 		view.AddOption( "Show IK Bones", "polyline", () =>
 			_controller.UpdateWorkspacePreference(
 				"Show IK bones",

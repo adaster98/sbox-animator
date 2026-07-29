@@ -386,6 +386,68 @@ public static class WeaponAnimatorSelfTests
 			report,
 			!document.Workspace.ShowIkBones,
 			"IK bones must be hidden by default." );
+		Check(
+			report,
+			document.Workspace.BoneOcclusionEnabled,
+			"Dynamic bone occlusion must be enabled by default." );
+
+		// Occluded bones must read as a different category, not just a dimmer copy: hue carries
+		// depth along the arm, so draining it is what makes "behind something" legible.
+		static float Saturation( Color color )
+		{
+			var max = MathF.Max( color.r, MathF.Max( color.g, color.b ) );
+			var min = MathF.Min( color.r, MathF.Min( color.g, color.b ) );
+			return max - min;
+		}
+
+		var vividBone = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 8, 8, false ).Color;
+		var occludedBone = SkeletonOverlayStyle.Occlude( vividBone );
+		var gradientOverlay = SkeletonOverlayStyle.Resolve( true, 1.0f );
+		var visibleLine = gradientOverlay.ResolveLineVisual(
+			SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 1, 8, false ),
+			false );
+		var hiddenLine = gradientOverlay.ResolveLineVisual(
+			SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 2, 8, false ),
+			true );
+		var middleLine = SkeletonLineVisual.Lerp( visibleLine, hiddenLine, 0.5f );
+		Check(
+			report,
+			Saturation( occludedBone ) < Saturation( vividBone ) * 0.35f,
+			"Occluded bones must lose most of their colour so they stop competing for attention." );
+		Check(
+			report,
+			Saturation( occludedBone ) > 0.001f,
+			"Occluded bones must keep a trace of colour so weapon and arm stay tellable apart." );
+		Check(
+			report,
+			SkeletonOverlayStyle.Occlude( Color.White.WithAlpha( 0.4f ) ).a == 0.4f,
+			"Draining colour must not disturb the alpha the occluded pass already applies." );
+		Check(
+			report,
+			SkeletonOverlayStyle.OccludedDotScale < 1.0f
+				&& SkeletonOverlayStyle.OccludedLineThickness < 1.0f,
+			"Occluded bones must draw smaller so they do not veil bones in front." );
+		Check(
+			report,
+			middleLine.Thickness < visibleLine.Thickness
+				&& middleLine.Thickness > hiddenLine.Thickness
+				&& middleLine.Color.a < visibleLine.Color.a
+				&& middleLine.Color.a > hiddenLine.Color.a
+				&& middleLine.Color != visibleLine.Color
+				&& middleLine.Color != hiddenLine.Color,
+			"A mixed-visibility connection must gradient its colour, opacity, and width." );
+		Check(
+			report,
+			SkeletonOverlayStyle.OcclusionDepthClearance( 80 )
+				> SkeletonOverlayStyle.OcclusionDepthClearance( 10 )
+				&& SkeletonOverlayStyle.OcclusionDepthClearance( float.NaN ) > 0,
+			"Occlusion clearance must follow marker size and remain valid for bad camera distances." );
+		Check(
+			report,
+			!SkeletonOverlayStyle.IsOccludingDepth( 80.015f, 80.015f )
+				&& !SkeletonOverlayStyle.IsOccludingDepth( 80.015f, 79.95f )
+				&& SkeletonOverlayStyle.IsOccludingDepth( 80.015f, 79.0f ),
+			"A surface at the bone endpoint must remain visible while a nearer surface occludes it." );
 
 		var xrayStyle = SkeletonOverlayStyle.Resolve( true, 1.0f );
 		Check(
@@ -394,18 +456,18 @@ public static class WeaponAnimatorSelfTests
 			"Bones hidden behind the arms must be visible by default." );
 		Check(
 			report,
-			xrayStyle.DrawOccludedPass
+			xrayStyle.DrawThroughMeshes
 				&& xrayStyle.OccludedAlpha > 0
 				&& xrayStyle.OccludedAlpha < 1.0f,
 			"Occluded bones must stay visible but subordinate to unoccluded ones." );
 		Check(
 			report,
-			!SkeletonOverlayStyle.Resolve( false, 1.0f ).DrawOccludedPass,
+			!SkeletonOverlayStyle.Resolve( false, 1.0f ).DrawThroughMeshes,
 			"Disabling x-ray must restore the depth-tested skeleton overlay." );
 		Check(
 			report,
-			!SkeletonOverlayStyle.Resolve( true, 0 ).DrawOccludedPass,
-			"A fully faded skeleton must not cost a second overlay pass." );
+			!SkeletonOverlayStyle.Resolve( true, 0 ).DrawThroughMeshes,
+			"A fully faded skeleton must not draw through viewport meshes." );
 		Check(
 			report,
 			SkeletonOverlayStyle.Resolve( true, 0.18f ).OccludedAlpha < xrayStyle.OccludedAlpha,
@@ -422,6 +484,36 @@ public static class WeaponAnimatorSelfTests
 			SkeletonOverlayStyle.Resolve( true, float.NaN ).OccludedAlpha,
 			0.0001f,
 			"A non-finite overlay alpha must fall back to the default." );
+
+		Check(
+			report,
+			!SkeletonOcclusionPolicy.IsOccludedByArm(
+				false,
+				1,
+				1 )
+				&& SkeletonOcclusionPolicy.IsOccludedByArm(
+					false,
+					1,
+					-1 ),
+			"Each finger must ignore its own hand mesh and reduce only behind the opposite hand." );
+		Check(
+			report,
+			SkeletonOcclusionPolicy.IsOccludedByArm(
+				true,
+				0,
+				1 ),
+			"Weapon bones must reduce only when an arm is actually in front." );
+		Check(
+			report,
+			!SkeletonOcclusionPolicy.IsOccludedByArm(
+				false,
+				-1,
+				0 )
+				&& !SkeletonOcclusionPolicy.IsOccludedByArm(
+					false,
+					-1,
+					-1 ),
+			"Unowned and same-side surfaces must never reduce an arm bone." );
 
 		var first = WeaponAnimationClip.Create( WeaponClipRole.Custom );
 		var second = WeaponAnimationClip.Create( WeaponClipRole.Custom );
