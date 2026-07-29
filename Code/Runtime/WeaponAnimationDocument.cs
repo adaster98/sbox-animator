@@ -273,6 +273,7 @@ public sealed class SourceModelSettings
 	public string PreviewHostPath { get; set; } = "";
 	public string SourceHash { get; set; } = "";
 	public string SourceRootBoneName { get; set; } = "";
+	public Vector3 OriginalModelDimensions { get; set; }
 	public bool NeedsModelDocWrapper { get; set; }
 	public bool Compiled { get; set; }
 	public bool PreviewHostCompiled { get; set; }
@@ -509,6 +510,7 @@ public sealed class WeaponAnimationClip
 	public float SampleRate { get; set; } = 30.0f;
 	public bool AllowSubframeKeys { get; set; }
 	public bool Loop { get; set; }
+	public string GeneratedSequenceName { get; set; } = "";
 	public List<TransformTrack> Tracks { get; set; } = [];
 	public List<VisibilityTrack> VisibilityTracks { get; set; } = [];
 	public List<TimedConstraint> Constraints { get; set; } = [];
@@ -874,6 +876,69 @@ public static class WeaponAnimationNames
 
 	public static string SequenceName( WeaponAnimationClip clip ) =>
 		clip.Role == WeaponClipRole.Custom
-			? $"{WeaponAnimationDocument.Slugify( clip.Name )}_{clip.Id:N}"
+			? !string.IsNullOrWhiteSpace( clip.GeneratedSequenceName )
+				? clip.GeneratedSequenceName
+				: ShortCustomSequenceName(
+					WeaponAnimationDocument.Slugify( clip.Name ),
+					clip.Id )
 			: SequenceName( clip.Role );
+
+	public static bool RepairCustomSequenceNames( WeaponAnimationDocument document )
+	{
+		var changed = false;
+		var used = document.Clips
+			.Where( clip => clip.Role != WeaponClipRole.Custom )
+			.Select( clip => SequenceName( clip.Role ) )
+			.ToHashSet( StringComparer.OrdinalIgnoreCase );
+		foreach ( var clip in document.Clips.Where( clip =>
+			clip.Role == WeaponClipRole.Custom ) )
+		{
+			var existing = string.IsNullOrWhiteSpace( clip.GeneratedSequenceName )
+				? ""
+				: WeaponAnimationDocument.Slugify( clip.GeneratedSequenceName );
+			if ( !string.IsNullOrWhiteSpace( existing ) && used.Add( existing ) )
+			{
+				if ( clip.GeneratedSequenceName != existing )
+				{
+					clip.GeneratedSequenceName = existing;
+					changed = true;
+				}
+				continue;
+			}
+
+			var stem = WeaponAnimationDocument.Slugify( clip.Name );
+			if ( string.IsNullOrWhiteSpace( stem ) )
+				stem = "custom";
+			var candidate = stem;
+			if ( !used.Add( candidate ) )
+			{
+				var id = clip.Id.ToString( "N" );
+				var assigned = false;
+				for ( var suffixLength = 8;
+					suffixLength <= id.Length;
+					suffixLength += 4 )
+				{
+					candidate = $"{stem}_{id[..suffixLength]}";
+					if ( !used.Add( candidate ) )
+						continue;
+					assigned = true;
+					break;
+				}
+
+				for ( var collision = 2; !assigned; collision++ )
+				{
+					candidate = $"{stem}_{id}_{collision}";
+					assigned = used.Add( candidate );
+				}
+			}
+			if ( clip.GeneratedSequenceName == candidate )
+				continue;
+			clip.GeneratedSequenceName = candidate;
+			changed = true;
+		}
+		return changed;
+	}
+
+	private static string ShortCustomSequenceName( string stem, Guid id ) =>
+		$"{stem}_{id:N}"[..(stem.Length + 9)];
 }

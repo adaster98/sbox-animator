@@ -41,6 +41,15 @@ public sealed class ValidationReport
 	}
 }
 
+public static class WeaponSourceFormatSupport
+{
+	public static bool CanGenerate( string path ) =>
+		path.EndsWith( ".fbx", StringComparison.OrdinalIgnoreCase )
+		|| path.EndsWith( ".dmx", StringComparison.OrdinalIgnoreCase )
+		|| path.EndsWith( ".obj", StringComparison.OrdinalIgnoreCase )
+		|| path.EndsWith( ".vmdl", StringComparison.OrdinalIgnoreCase );
+}
+
 public static class WeaponAnimationValidator
 {
 	private static readonly HashSet<string> ReservedArmBones = new( StringComparer.OrdinalIgnoreCase )
@@ -95,7 +104,11 @@ public static class WeaponAnimationValidator
 		}
 		else
 		{
-			var dimensions = document.Calibration.Measurement.ResultingDimensions;
+			var physicalScale = document.Calibration.PhysicalTransform.Scale;
+			var dimensions = document.Source.OriginalModelDimensions * new Vector3(
+				MathF.Abs( physicalScale.x ),
+				MathF.Abs( physicalScale.y ),
+				MathF.Abs( physicalScale.z ) );
 			var longest = MathF.Max( dimensions.x, MathF.Max( dimensions.y, dimensions.z ) );
 			if ( longest > 0 && (longest < 2.0f || longest > 80.0f) )
 			{
@@ -145,6 +158,17 @@ public static class WeaponAnimationValidator
 	public static ValidationReport ValidateForGeneration( WeaponAnimationDocument document )
 	{
 		var report = ValidateCalibration( document );
+		if ( !string.IsNullOrWhiteSpace( document.Source.SourcePath )
+			&& !WeaponSourceFormatSupport.CanGenerate( document.Source.SourcePath ) )
+		{
+			var format = SourceFormatName( document.Source.SourcePath );
+			report.Add(
+				ValidationSeverity.Error,
+				"source.not_embeddable",
+				$"The imported {format} can be audited and animated, but S&box ModelDoc cannot embed "
+					+ $"{format} render geometry in the generated viewmodel. Re-export the source as "
+					+ "FBX or DMX before generating." );
+		}
 		ValidateMaterials( document, report );
 		ValidateVisibilityParts( document, report );
 
@@ -262,6 +286,15 @@ public static class WeaponAnimationValidator
 		}
 
 		return report;
+	}
+
+	private static string SourceFormatName( string path )
+	{
+		var separator = Math.Max( path.LastIndexOf( '/' ), path.LastIndexOf( '\\' ) );
+		var dot = path.LastIndexOf( '.' );
+		return dot > separator && dot + 1 < path.Length
+			? path[(dot + 1)..].ToUpperInvariant()
+			: "source format";
 	}
 
 	private static void ValidateMaterials(

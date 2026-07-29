@@ -252,7 +252,7 @@ public sealed class ClipRackPanel : Widget
 				_rigCanvas.Layout.Add( button );
 			}
 
-			foreach ( var bone in HostSkeletonBuilder.Build( _controller.Document ).Bones )
+			foreach ( var bone in HostSkeletonBuilder.BuildCached( _controller.Document ).Bones )
 			{
 				var button = new WeaponAnimatorButton( bone.Name, _rigCanvas )
 				{
@@ -297,6 +297,12 @@ public sealed class ClipRackPanel : Widget
 		if ( _propertiesCanvas is null || clip is null )
 			return;
 		_propertiesCanvas.Layout.Add( Header( "CLIP PROPERTIES", _propertiesCanvas ) );
+		var sequence = WeaponAnimatorTheme.Label(
+			$"Sequence: {WeaponAnimationNames.SequenceName( clip )}",
+			_propertiesCanvas,
+			true );
+		sequence.ToolTip = "Generated sequence name";
+		_propertiesCanvas.Layout.Add( sequence );
 		AddClipNumber(
 			"Duration",
 			clip.Duration,
@@ -450,7 +456,7 @@ public sealed class ClipRackPanel : Widget
 			document.Workspace.TimelineViews.RemoveAll( x => x.ClipId == clip.Id );
 			document.Workspace.CurveViews.RemoveAll( x => x.ClipId == clip.Id );
 			clip.VisibilityTracks.Clear();
-			var skeleton = HostSkeletonBuilder.Build( document );
+			var skeleton = HostSkeletonBuilder.BuildCached( document );
 			if ( clip.Role == WeaponClipRole.Idle )
 			{
 				IdleBindPoseService.SeedFromCurrentBind( document, skeleton );
@@ -560,6 +566,7 @@ public sealed class ClipRackPanel : Widget
 			var clip = WeaponAnimationClip.Create( WeaponClipRole.Custom );
 			clip.Name = $"Custom {count}";
 			document.Clips.Add( clip );
+			WeaponAnimationNames.RepairCustomSequenceNames( document );
 			document.Workspace.SelectedClipId = clip.Id;
 		} );
 	}
@@ -703,7 +710,7 @@ public sealed class AnimationInspectorPanel : Widget
 				instruction.WordWrap = true;
 				bindingCanvas.Layout.Add( instruction );
 
-				var weaponBones = HostSkeletonBuilder.Build( _controller.Document )
+				var weaponBones = HostSkeletonBuilder.BuildCached( _controller.Document )
 					.Bones
 					.Where( x => x.IsWeaponBone )
 					.Select( x => x.Name )
@@ -967,7 +974,7 @@ public sealed class AnimationInspectorPanel : Widget
 	private void SaveGripPose()
 	{
 		var document = _controller.Document;
-		var skeleton = HostSkeletonBuilder.Build( document );
+		var skeleton = HostSkeletonBuilder.BuildCached( document );
 		var pose = AnimationPoseEvaluator.Evaluate(
 			document,
 			skeleton,
@@ -1285,53 +1292,7 @@ public sealed class AnimationTimelinePanel : Widget
 	}
 
 	private void AddKey()
-	{
-		var document = _controller.Document;
-		var selectedControl = document.Workspace.SelectedControl;
-		if ( !string.IsNullOrWhiteSpace( selectedControl ) )
-		{
-			var target = selectedControl switch
-			{
-				"@primary_hand" => document.Binding.PrimaryHand,
-				"@support_hand" => document.Binding.SupportHand,
-				"@primary_elbow" => document.Binding.PrimaryElbowPole,
-				"@support_elbow" => document.Binding.SupportElbowPole,
-				_ => null
-			};
-			if ( target is not null )
-			{
-				var controlClip = document.GetSelectedClip();
-				var controlFallback = controlClip is null
-					? target.Transform
-					: controlClip.Tracks.FirstOrDefault( x =>
-						x.Target.Equals( selectedControl, StringComparison.OrdinalIgnoreCase ) ) is { } controlTrack
-						? WeaponAnimationMath.SampleTrack(
-							controlTrack,
-							document.Workspace.TimelineTime,
-							target.Transform )
-						: target.Transform;
-				_controller.CommitWorkingPose( selectedControl, RigControlKind.Arm, controlFallback );
-			}
-			return;
-		}
-
-		var selectedBone = document.Workspace.SelectedBone;
-		if ( string.IsNullOrWhiteSpace( selectedBone ) )
-			return;
-		var skeleton = HostSkeletonBuilder.Build( document );
-		if ( !skeleton.ByName.TryGetValue( selectedBone, out var bone ) )
-			return;
-		var clip = document.GetSelectedClip();
-		var fallback = skeleton.GetBindLocal( bone );
-		var track = clip?.Tracks.FirstOrDefault( x => x.Target == selectedBone );
-		var value = track is null
-			? fallback
-			: WeaponAnimationMath.SampleTrack( track, document.Workspace.TimelineTime, fallback );
-		_controller.CommitWorkingPose(
-			selectedBone,
-			bone.IsWeaponBone ? RigControlKind.Weapon : RigControlKind.Arm,
-			value );
-	}
+		=> _controller.KeySelectedTransform();
 
 	private void Refresh()
 	{
@@ -1490,14 +1451,14 @@ internal sealed class TimelineCanvas : Widget
 		MouseTracking = true;
 		SetStyles( "background-color: rgb(12,14,16); border: none;" );
 		_controller.DocumentChanged += Update;
-		_controller.SelectionChanged += Update;
+		_controller.KeySelectionChanged += Update;
 		_controller.TimelineChanged += Update;
 	}
 
 	public override void OnDestroyed()
 	{
 		_controller.DocumentChanged -= Update;
-		_controller.SelectionChanged -= Update;
+		_controller.KeySelectionChanged -= Update;
 		_controller.TimelineChanged -= Update;
 		base.OnDestroyed();
 	}

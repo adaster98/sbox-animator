@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using Editor;
 using Sandbox;
 
@@ -141,6 +142,10 @@ public sealed class RigAuditPanel : Widget
 	private readonly LineEdit _search;
 	private readonly Label _sourceStatus;
 	private readonly Label _retainedStatus;
+	private readonly Dictionary<string, WeaponAnimatorButton> _boneButtons =
+		new( StringComparer.OrdinalIgnoreCase );
+	private string _lastSelectedBone = "";
+	private string _boneStructureSignature = "";
 	private string _filter = "";
 	private bool _showMovable = true;
 	private bool _showStructural = true;
@@ -236,14 +241,14 @@ public sealed class RigAuditPanel : Widget
 		Layout.Add( reset );
 
 		_controller.DocumentChanged += Refresh;
-		_controller.SelectionChanged += RebuildBones;
+		_controller.SelectionChanged += RefreshBoneSelection;
 		Refresh();
 	}
 
 	public override void OnDestroyed()
 	{
 		_controller.DocumentChanged -= Refresh;
-		_controller.SelectionChanged -= RebuildBones;
+		_controller.SelectionChanged -= RefreshBoneSelection;
 		base.OnDestroyed();
 	}
 
@@ -270,7 +275,16 @@ public sealed class RigAuditPanel : Widget
 						x.Inclusion == WeaponBoneInclusion.Excluded && x.HasSkinInfluence )
 					? "\nExcluded branches may affect visible geometry; verify the model before confirming."
 					: "");
-		RebuildBones();
+		var signature = BoneStructureSignature(
+			rig,
+			_filter,
+			_showMovable,
+			_showStructural,
+			_showIgnored );
+		if ( signature != _boneStructureSignature )
+			RebuildBones();
+		else
+			RefreshBoneSelection();
 	}
 
 	private void RebuildBones()
@@ -278,19 +292,39 @@ public sealed class RigAuditPanel : Widget
 		if ( _boneCanvas is null )
 			return;
 		_boneCanvas.Layout.Clear( true );
+		_boneButtons.Clear();
+		var bonesByName = _controller.Document.Rig.Bones
+			.GroupBy( x => x.Name, StringComparer.OrdinalIgnoreCase )
+			.ToDictionary(
+				x => x.Key,
+				x => x.First(),
+				StringComparer.OrdinalIgnoreCase );
+		var depths = new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase );
+
+		int ResolveDepth( WeaponBoneDefinition bone, HashSet<string> visiting )
+		{
+			if ( depths.TryGetValue( bone.Name, out var cached ) )
+				return cached;
+			if ( !visiting.Add( bone.Name )
+				|| string.IsNullOrWhiteSpace( bone.ParentName )
+				|| !bonesByName.TryGetValue( bone.ParentName, out var parent ) )
+				return depths[bone.Name] = 0;
+			var depth = Math.Min( ResolveDepth( parent, visiting ) + 1, 16 );
+			visiting.Remove( bone.Name );
+			return depths[bone.Name] = depth;
+		}
 
 		foreach ( var bone in _controller.Document.Rig.Bones.Where( IsVisible ) )
 		{
 			var row = Row( _boneCanvas );
 			row.FixedHeight = 28;
-			var depth = BoneDepth( bone );
+			var depth = ResolveDepth( bone, [] );
 			var name = new WeaponAnimatorButton( $"{new string( ' ', Math.Min( depth, 8 ) * 2 )}{bone.Name}", row )
 			{
 				Clicked = () => _controller.SelectBone( bone.Name ),
-				Tint = bone.Name == _controller.Document.Workspace.SelectedBone
-					? WeaponAnimatorTheme.Cyan * 0.45f
-					: WeaponAnimatorTheme.Surface
+				Tint = WeaponAnimatorTheme.Surface
 			};
+			_boneButtons[bone.Name] = name;
 			row.Layout.Add( name, 1 );
 
 			var classification = new WeaponAnimatorButton( ShortClassification( bone.Classification ), row )
@@ -311,6 +345,60 @@ public sealed class RigAuditPanel : Widget
 		}
 
 		_boneCanvas.Layout.AddStretchCell();
+		_boneStructureSignature = BoneStructureSignature(
+			_controller.Document.Rig,
+			_filter,
+			_showMovable,
+			_showStructural,
+			_showIgnored );
+		_lastSelectedBone = "";
+		RefreshBoneSelection();
+	}
+
+	internal static string BoneStructureSignature(
+		WeaponRigDefinition rig,
+		string filter,
+		bool showMovable,
+		bool showStructural,
+		bool showIgnored )
+	{
+		var signature = new StringBuilder()
+			.Append( filter )
+			.Append( '|' )
+			.Append( showMovable ? '1' : '0' )
+			.Append( showStructural ? '1' : '0' )
+			.Append( showIgnored ? '1' : '0' );
+
+		foreach ( var bone in rig.Bones )
+		{
+			signature
+				.Append( '\n' )
+				.Append( bone.Id )
+				.Append( '\t' )
+				.Append( bone.Name )
+				.Append( '\t' )
+				.Append( bone.ParentId )
+				.Append( '\t' )
+				.Append( bone.ParentName )
+				.Append( '\t' )
+				.Append( (int)bone.Classification )
+				.Append( '\t' )
+				.Append( (int)bone.Inclusion );
+		}
+
+		return signature.ToString();
+	}
+
+	private void RefreshBoneSelection()
+	{
+		var selected = _controller.Document.Workspace.SelectedBone;
+		if ( _lastSelectedBone.Equals( selected, StringComparison.OrdinalIgnoreCase ) )
+			return;
+		if ( _boneButtons.TryGetValue( _lastSelectedBone, out var previous ) )
+			previous.Tint = WeaponAnimatorTheme.Surface;
+		if ( _boneButtons.TryGetValue( selected, out var current ) )
+			current.Tint = WeaponAnimatorTheme.Cyan * 0.45f;
+		_lastSelectedBone = selected;
 	}
 
 	private bool IsVisible( WeaponBoneDefinition bone )
@@ -407,18 +495,6 @@ public sealed class RigAuditPanel : Widget
 		RigReviewConfirmed?.Invoke();
 	}
 
-	private int BoneDepth( WeaponBoneDefinition bone )
-	{
-		var depth = 0;
-		var parent = bone.ParentName;
-		while ( !string.IsNullOrWhiteSpace( parent ) && depth < 16 )
-		{
-			depth++;
-			parent = _controller.Document.Rig.FindBone( parent )?.ParentName ?? "";
-		}
-		return depth;
-	}
-
 	private static string ShortClassification( WeaponBoneClassification value ) => value switch
 	{
 		WeaponBoneClassification.WeaponRoot => "R",
@@ -463,6 +539,7 @@ public sealed class CalibrationInspectorPanel : Widget
 	private readonly Label _confirmationState;
 	private readonly LineEdit _knownDistance;
 	private readonly List<Action> _transformRefreshers = [];
+	private readonly List<Action> _documentRefreshers = [];
 	private Vector3 _modelDimensions;
 
 	public event Action<ViewportPickMode>? PickRequested;
@@ -511,7 +588,7 @@ public sealed class CalibrationInspectorPanel : Widget
 			FixedHeight = 28
 		};
 		_knownDistance.SetStyles( WeaponAnimatorTheme.InputStyle );
-		_knownDistance.EditingFinished += PreviewScale;
+		_knownDistance.EditingFinished += CommitScalePreview;
 		knownRow.Layout.Add( _knownDistance, 1 );
 
 		var unitButton = new WeaponAnimatorButton( "in", knownRow )
@@ -521,6 +598,13 @@ public sealed class CalibrationInspectorPanel : Widget
 			Tint = WeaponAnimatorTheme.SurfaceRaised
 		};
 		knownRow.Layout.Add( unitButton );
+		_documentRefreshers.Add( () =>
+		{
+			unitButton.Text = _controller.Document.Calibration.Measurement.Unit
+				== MeasurementUnit.Inches
+					? "in"
+					: "cm";
+		} );
 		canvas.Layout.Add( knownRow );
 
 		_measurementResult = WeaponAnimatorTheme.Label( "Pick two points to establish scale.", canvas, true );
@@ -574,7 +658,7 @@ public sealed class CalibrationInspectorPanel : Widget
 			"delete_sweep",
 			ClearAllAnchors,
 			canvas ) );
-		_transformRefreshers.Add( () =>
+		_documentRefreshers.Add( () =>
 		{
 			var calibration = _controller.Document.Calibration;
 			autoAlign.Enabled = calibration.GetAnchor( AnchorKind.Grip ) is not null
@@ -597,12 +681,12 @@ public sealed class CalibrationInspectorPanel : Widget
 		modeRow.Layout.Add( Toggle(
 			modeRow,
 			"Viewmodel camera",
-			_controller.Document.Workspace.FirstPersonPreview,
+			() => _controller.Document.Workspace.FirstPersonPreview,
 			value => _controller.Mutate( "Preview mode", d => d.Workspace.FirstPersonPreview = value ) ), 1 );
 		modeRow.Layout.Add( Toggle(
 			modeRow,
 			"Safe area",
-			_controller.Document.Calibration.ShowSafeArea,
+			() => _controller.Document.Calibration.ShowSafeArea,
 			value => _controller.Mutate( "Safe area", d => d.Calibration.ShowSafeArea = value ) ), 1 );
 		canvas.Layout.Add( modeRow );
 		canvas.Layout.Add( ChoiceButton(
@@ -639,6 +723,7 @@ public sealed class CalibrationInspectorPanel : Widget
 
 		_controller.DocumentChanged += Refresh;
 		_controller.SelectionChanged += Refresh;
+		_controller.PoseChanged += RefreshTransformValues;
 		Refresh();
 	}
 
@@ -646,6 +731,7 @@ public sealed class CalibrationInspectorPanel : Widget
 	{
 		_controller.DocumentChanged -= Refresh;
 		_controller.SelectionChanged -= Refresh;
+		_controller.PoseChanged -= RefreshTransformValues;
 		base.OnDestroyed();
 	}
 
@@ -678,71 +764,121 @@ public sealed class CalibrationInspectorPanel : Widget
 		}
 
 		var measurement = document.Calibration.Measurement;
-		_knownDistance.Value = measurement.KnownDistance > 0
-			? measurement.KnownDistance.ToString( "0.###", CultureInfo.InvariantCulture )
-			: "";
+		if ( !_knownDistance.IsFocused )
+		{
+			_knownDistance.Value = measurement.KnownDistance > 0
+				? measurement.KnownDistance.ToString( "0.###", CultureInfo.InvariantCulture )
+				: "";
+		}
 		PreviewScale();
 
 		var report = WeaponAnimationValidator.ValidateCalibration( document );
 		_confirmationState.Text = report.IsValid
 			? "All calibration checks pass. Confirmation will snapshot the rig and seed Idle."
 			: string.Join( "\n", report.Issues.Where( x => x.Blocking ).Take( 5 ).Select( x => $"• {x.Message}" ) );
-		foreach ( var refresh in _transformRefreshers )
-			refresh();
+		RefreshDocumentValues();
 	}
 
 	private void PreviewScale()
 	{
-		if ( !float.TryParse(
-			_knownDistance.Text,
-			NumberStyles.Float,
-			CultureInfo.InvariantCulture,
-			out var known ) )
+		if ( !TryCalculateScalePreview( out _, out var preview ) )
 		{
+			_measurementResult.Text =
+				"Pick two distinct points and enter a positive known distance.";
 			return;
 		}
 
-		var measurement = _controller.Document.Calibration.Measurement;
-		measurement.KnownDistance = known;
-		if ( !measurement.HasFirstPoint || !measurement.HasSecondPoint
-			|| !WeaponAnimationMath.TryCalculateUniformScale(
-				measurement.FirstPoint,
-				measurement.SecondPoint,
-				known,
-				measurement.Unit,
-				_modelDimensions,
-				out var preview ) )
-		{
-			measurement.HasPendingScale = false;
-			_measurementResult.Text = "Pick two distinct points and enter a positive known distance.";
-			return;
-		}
-
-		measurement.PreviewScale = preview.UniformScale;
-		measurement.HasPendingScale = true;
-		measurement.OriginalDimensions = preview.OriginalDimensions;
-		measurement.ResultingDimensions = preview.ResultingDimensions;
 		_measurementResult.Text =
 			$"Measured {preview.MeasuredUnits:0.###} units. Scale ×{preview.UniformScale:0.####}\n" +
 			$"Original XYZ: {FormatDimensions( preview.OriginalDimensions )}\n" +
 			$"Result XYZ: {FormatDimensions( preview.ResultingDimensions )}";
 	}
 
+	private void CommitScalePreview()
+	{
+		var hasPreview = TryCalculateScalePreview( out var known, out var preview );
+		if ( !float.TryParse(
+			_knownDistance.Text,
+			NumberStyles.Float,
+			CultureInfo.InvariantCulture,
+			out known )
+			|| !WeaponAnimationMath.IsFinite( known )
+			|| known <= 0 )
+		{
+			_measurementResult.Text = "Pick two distinct points and enter a positive known distance.";
+			return;
+		}
+
+		_controller.Mutate( "Update scale measurement", document =>
+		{
+			var measurement = document.Calibration.Measurement;
+			measurement.KnownDistance = known;
+			measurement.HasPendingScale = hasPreview;
+			if ( !hasPreview )
+				return;
+			measurement.PreviewScale = preview.UniformScale;
+			measurement.OriginalDimensions = preview.OriginalDimensions;
+			measurement.ResultingDimensions = preview.ResultingDimensions;
+		} );
+	}
+
 	private void ApplyScale()
 	{
-		PreviewScale();
-		var measurement = _controller.Document.Calibration.Measurement;
-		if ( !measurement.HasPendingScale )
+		if ( !TryCalculateScalePreview( out var known, out var preview ) )
 			return;
 
 		_controller.Mutate( "Apply uniform scale", document =>
 		{
-			document.Calibration.UniformScale = measurement.PreviewScale;
+			var measurement = document.Calibration.Measurement;
+			measurement.KnownDistance = known;
+			measurement.PreviewScale = preview.UniformScale;
+			measurement.OriginalDimensions = preview.OriginalDimensions;
+			measurement.ResultingDimensions = preview.ResultingDimensions;
+			document.Calibration.UniformScale = preview.UniformScale;
 			document.Calibration.PhysicalTransform =
-				document.Calibration.PhysicalTransform.WithScale( measurement.PreviewScale );
+				document.Calibration.PhysicalTransform.WithScale( preview.UniformScale );
 			document.Calibration.Confirmed = false;
 			measurement.HasPendingScale = false;
 		} );
+	}
+
+	private bool TryCalculateScalePreview(
+		out float known,
+		out ScalePreview preview )
+	{
+		preview = default;
+		if ( !float.TryParse(
+				_knownDistance.Text,
+				NumberStyles.Float,
+				CultureInfo.InvariantCulture,
+				out known )
+			|| !WeaponAnimationMath.IsFinite( known )
+			|| known <= 0 )
+			return false;
+
+		var measurement = _controller.Document.Calibration.Measurement;
+		return measurement.HasFirstPoint
+			&& measurement.HasSecondPoint
+			&& WeaponAnimationMath.TryCalculateUniformScale(
+				measurement.FirstPoint,
+				measurement.SecondPoint,
+				known,
+				measurement.Unit,
+				_modelDimensions,
+				out preview );
+	}
+
+	private void RefreshTransformValues()
+	{
+		foreach ( var refresh in _transformRefreshers )
+			refresh();
+	}
+
+	private void RefreshDocumentValues()
+	{
+		RefreshTransformValues();
+		foreach ( var refresh in _documentRefreshers )
+			refresh();
 	}
 
 	private void AddTransformFields( Widget parent, string label, bool framing )
@@ -989,7 +1125,7 @@ public sealed class CalibrationInspectorPanel : Widget
 		delete.FixedWidth = 34;
 		delete.ToolTip = $"Delete {name.ToLowerInvariant()}";
 		row.Layout.Add( delete );
-		_transformRefreshers.Add( () =>
+		_documentRefreshers.Add( () =>
 		{
 			var exists = _controller.Document.Calibration.GetAnchor( kind ) is not null;
 			var selected = _controller.Document.Workspace.SelectedControl == CalibrationSelection.Anchor( kind );
@@ -1036,19 +1172,24 @@ public sealed class CalibrationInspectorPanel : Widget
 		return WeaponAnimatorTheme.SectionLabel( text, parent, topMargin: true );
 	}
 
-	private static Button Toggle( Widget parent, string text, bool value, Action<bool> changed )
+	private Button Toggle(
+		Widget parent,
+		string text,
+		Func<bool> current,
+		Action<bool> changed )
 	{
 		var button = new WeaponAnimatorButton( text, parent )
 		{
 			IsToggle = true,
-			IsChecked = value,
+			IsChecked = current(),
 			Tint = WeaponAnimatorTheme.SurfaceRaised
 		};
 		button.Toggled = () => changed( button.IsChecked );
+		_documentRefreshers.Add( () => button.IsChecked = current() );
 		return button;
 	}
 
-	private static Button ChoiceButton(
+	private Button ChoiceButton(
 		Widget parent,
 		string label,
 		Func<string> current,
@@ -1074,6 +1215,11 @@ public sealed class CalibrationInspectorPanel : Widget
 			}
 			menu.OpenAt( button.ScreenRect.BottomLeft );
 		};
+		_documentRefreshers.Add( () =>
+		{
+			button.Text = $"{label}: {current()}";
+			button.FitToContent();
+		} );
 		return button;
 	}
 }

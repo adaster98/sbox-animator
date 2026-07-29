@@ -61,6 +61,7 @@ public static class WeaponAnimatorSelfTests
 		Run( report, "calibration rebase", TestRebase );
 		Run( report, "DMX output", TestDmxOutput );
 		Run( report, "filtered source wrapper", TestFilteredSourceWrapper );
+		Run( report, "generation source adapters", TestGenerationSourceAdapters );
 		Run( report, "deterministic generated text", TestDeterministicOutput );
 		Run( report, "AnimGraph tags and fallbacks", TestAnimGraphTagsAndFallbacks );
 		return report;
@@ -255,6 +256,21 @@ public static class WeaponAnimatorSelfTests
 			report,
 			WeaponAnimationNames.SequenceName( first ) != WeaponAnimationNames.SequenceName( second ),
 			"Custom sequence names must remain unique." );
+		document.Clips.Add( first );
+		document.Clips.Add( second );
+		Check(
+			report,
+			WeaponAnimationNames.RepairCustomSequenceNames( document )
+				&& !first.GeneratedSequenceName.Contains( first.Id.ToString( "N" ), StringComparison.Ordinal )
+				&& !second.GeneratedSequenceName.Contains( second.Id.ToString( "N" ), StringComparison.Ordinal )
+				&& first.GeneratedSequenceName != second.GeneratedSequenceName,
+			"Custom clips must receive stable, readable sequence names with short collision suffixes." );
+		var customSequence = first.GeneratedSequenceName;
+		Check(
+			report,
+			!WeaponAnimationNames.RepairCustomSequenceNames( document )
+				&& first.GeneratedSequenceName == customSequence,
+			"Resolved custom sequence names must remain stable across later repairs." );
 		Check(
 			report,
 			CalibrationSelection.TryGetAnchor(
@@ -384,6 +400,19 @@ public static class WeaponAnimatorSelfTests
 		Check( report, rig.FindBone( "receiver" )!.Inclusion == WeaponBoneInclusion.Included, "Weapon descendants must remain included." );
 		Check( report, rig.FindBone( "mystery_child" )!.Inclusion == WeaponBoneInclusion.Excluded, "Excluding a branch must exclude every descendant." );
 		Check( report, !rig.ReviewRequired && rig.FilteredPreviewConfirmed, "Confirming the filtered preview must close the rig-review gate." );
+		var auditSignature = RigAuditPanel.BoneStructureSignature( rig, "", true, true, false );
+		rig.ReviewRequired = true;
+		Equal(
+			report,
+			auditSignature,
+			RigAuditPanel.BoneStructureSignature( rig, "", true, true, false ),
+			"Non-structural document refreshes must not rebuild the rig-audit bone rows." );
+		rig.FindBone( "receiver" )!.Classification = WeaponBoneClassification.Structural;
+		Check(
+			report,
+			auditSignature != RigAuditPanel.BoneStructureSignature( rig, "", true, true, false ),
+			"Classification changes must rebuild the rig-audit bone rows." );
+		rig.FindBone( "receiver" )!.Classification = WeaponBoneClassification.Animatable;
 
 		var document = WeaponAnimationDocument.CreateDefault();
 		document.Rig = rig;
@@ -551,6 +580,33 @@ public static class WeaponAnimatorSelfTests
 			compilerHelper.Position,
 			0.0001f,
 			"Compiled bind expectations must preserve scale-baked physical child pivots." );
+		Equal(
+			report,
+			"weapon_helper",
+			rebuiltHierarchy.ChildrenOf( "weapon_root" ).Single().Name,
+			"Host skeletons must retain a direct parent-to-children lookup." );
+
+		var cachedA = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		var cachedB = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		Check(
+			report,
+			ReferenceEquals( cachedA, cachedB ),
+			"Unchanged rig inputs must reuse the cached animation-host skeleton." );
+		document.Calibration.PhysicalTransform =
+			document.Calibration.PhysicalTransform.WithPosition( new Vector3( 99, 0, 0 ) );
+		var cachedChanged = HostSkeletonBuilder.BuildCached( document, includeArmProfile: false );
+		Check(
+			report,
+			!ReferenceEquals( cachedA, cachedChanged ),
+			"Calibration changes must invalidate the cached animation-host skeleton." );
+		document.Calibration.PhysicalTransform =
+			document.Calibration.PhysicalTransform.WithPosition( new Vector3( 99.00001f, 0, 0 ) );
+		Check(
+			report,
+			!ReferenceEquals(
+				cachedChanged,
+				HostSkeletonBuilder.BuildCached( document, includeArmProfile: false ) ),
+			"Sub-display-precision transform changes must invalidate the host cache." );
 	}
 
 	private static void TestRigBrowserGrouping( WeaponAnimatorSelfTestReport report )
@@ -603,6 +659,17 @@ public static class WeaponAnimatorSelfTests
 		skeleton.Add( Bone( "arm_upper_R", "root", Vector3.Zero ) );
 		skeleton.Add( Bone( "arm_lower_R", "arm_upper_R", new Vector3( 1, 0, 0 ) ) );
 		skeleton.Add( Bone( "hand_R", "arm_lower_R", new Vector3( 2, 0, 0 ) ) );
+		skeleton.Add( Bone( "arm_upper_L", "root", Vector3.Zero ) );
+		Equal(
+			report,
+			1,
+			skeleton.ByName["arm_lower_R"].ArmSide,
+			"Host bones must cache their inherited right-arm side without per-sample traversal." );
+		Equal(
+			report,
+			-1,
+			skeleton.ByName["arm_upper_L"].ArmSide,
+			"Host bones must cache their left-arm side when added." );
 
 		var neutral = AnimationPoseEvaluator.Evaluate( document, skeleton, null, 0 );
 		Near( report, new Vector3( 2, 0, 0 ), neutral.Model["hand_R"].Position, 0.0001f, "An unbound arm must remain in its default pose." );
@@ -629,6 +696,12 @@ public static class WeaponAnimatorSelfTests
 			report,
 			AnimationPoseEvaluator.ShouldEvaluateTrack( document, skeleton, accidentalTrack ),
 			"Binding the primary hand must enable its arm tracks." );
+		var leftTrack = idle.EnsureTrack( "arm_upper_L" );
+		leftTrack.Kind = RigControlKind.Arm;
+		Check(
+			report,
+			!AnimationPoseEvaluator.ShouldEvaluateTrack( document, skeleton, leftTrack ),
+			"One-handed primary binding must not enable left-arm tracks." );
 		accidentalTrack.Keys.Clear();
 		var bound = AnimationPoseEvaluator.Evaluate( document, skeleton, null, 0 );
 		Near( report, document.Binding.PrimaryHand.Transform.Position, bound.Model["hand_R"].Position, 0.001f, "Explicitly binding the hand must enable IK." );
@@ -887,6 +960,23 @@ public static class WeaponAnimatorSelfTests
 			0.0001f,
 			"A complete scrub drag must collapse into one undo action." );
 
+		var beforeCalibration = controller.Document.Calibration.PhysicalTransform;
+		controller.BeginContinuousEdit( "Move calibrated weapon" );
+		controller.UpdateContinuousEdit( current =>
+			current.Calibration.PhysicalTransform =
+				beforeCalibration.WithPosition( new Vector3( 1, 2, 3 ) ) );
+		controller.UpdateContinuousEdit( current =>
+			current.Calibration.PhysicalTransform =
+				beforeCalibration.WithPosition( new Vector3( 4, 5, 6 ) ) );
+		controller.EndContinuousEdit();
+		controller.Undo();
+		Near(
+			report,
+			beforeCalibration.Position,
+			controller.Document.Calibration.PhysicalTransform.Position,
+			0.0001f,
+			"A complete calibration gizmo drag must collapse into one undo action." );
+
 		var attachmentDocument = ValidDocument();
 		attachmentDocument.Calibration.PhysicalTransform =
 			new Transform( new Vector3( 10, 0, 0 ) );
@@ -1109,6 +1199,30 @@ public static class WeaponAnimatorSelfTests
 			partialRoot.Keys[0].Position,
 			0.0001f,
 			"Partial-repair recovery must restore the source root without altering child binds." );
+
+		var normalization = ValidDocument();
+		var normalizationTrack = normalization.EnsureClip( WeaponClipRole.Idle )
+			.EnsureTrack( "weapon_root" );
+		normalizationTrack.Keys =
+		[
+			new TransformKey { Time = 1 },
+			new TransformKey { Time = 0 }
+		];
+		var custom = WeaponAnimationClip.Create( WeaponClipRole.Custom );
+		custom.Name = "Check Action";
+		normalization.Clips.Add( custom );
+		var normalized = WeaponAnimationMigration.MigrateAndRepair( normalization );
+		Check(
+			report,
+			normalized.RepairedKeyOrder
+				&& normalizationTrack.Keys[0].Time == 0
+				&& normalizationTrack.Keys[1].Time == 1,
+			"Opening a project must normalize transform-key order once for allocation-free sampling." );
+		Check(
+			report,
+			normalized.RepairedSequenceNames
+				&& custom.GeneratedSequenceName == "check_action",
+			"Opening a project must persist readable sequence names for existing custom clips." );
 
 		var temporary = Path.Combine( Path.GetTempPath(), $"weaponanim_{Guid.NewGuid():N}.wepanim" );
 		File.WriteAllText( temporary, "version two" );
@@ -2229,8 +2343,12 @@ public static class WeaponAnimatorSelfTests
 		Equal( report, "Changed", controller.Document.Name, "Redo must restore the changed snapshot." );
 		var documentEvents = 0;
 		var poseEvents = 0;
+		var selectionEvents = 0;
+		var keySelectionEvents = 0;
 		controller.DocumentChanged += () => documentEvents++;
 		controller.PoseChanged += () => poseEvents++;
+		controller.SelectionChanged += () => selectionEvents++;
+		controller.KeySelectionChanged += () => keySelectionEvents++;
 		controller.BeginContinuousEdit( "Scrub name" );
 		controller.UpdateContinuousEdit( document => document.Name = "Scrub A" );
 		controller.UpdateContinuousEdit( document => document.Name = "Scrub B" );
@@ -2258,7 +2376,17 @@ public static class WeaponAnimatorSelfTests
 		var clip = controller.Document.GetSelectedClip()!;
 		var track = clip.EnsureTrack( "weapon_root" );
 		var key = WeaponAnimationMath.UpsertKey( track, 0, new Transform( new Vector3( 1, 2, 3 ) ) );
+		var selectionBeforeKeys = selectionEvents;
 		controller.SelectKeys( [key.Id], false );
+		Equal(
+			report,
+			selectionBeforeKeys,
+			selectionEvents,
+			"Key selection must not broadcast a control-selection rebuild." );
+		Check(
+			report,
+			keySelectionEvents > 0,
+			"Key selection must publish its dedicated lightweight event." );
 		controller.CopySelectedKeys();
 		controller.SetTimelineTime( 0.5f );
 		controller.PasteKeys();
@@ -2270,6 +2398,19 @@ public static class WeaponAnimatorSelfTests
 			clip.EnsureTrack( "weapon_root" ).Keys.Max( x => x.Time ),
 			0.0001f,
 			"Pasted keys must be offset to the playhead." );
+
+		var keyController = new WeaponAnimatorController();
+		var keyDocument = ValidDocument();
+		keyController.SetDocument( keyDocument );
+		keyController.SelectBone( "weapon_root" );
+		keyController.SetTimelineTime( 0.5f );
+		keyController.KeySelectedTransform();
+		Check(
+			report,
+			keyController.Document.GetSelectedClip()!.Tracks
+				.Single( current => current.Target == "weapon_root" )
+				.Keys.Any( current => MathF.Abs( current.Time - 0.5f ) < 0.0001f ),
+			"The shared K/Add Key command must key a selected weapon bone." );
 	}
 
 	private static void TestValidation( WeaponAnimatorSelfTestReport report )
@@ -2282,12 +2423,41 @@ public static class WeaponAnimatorSelfTests
 			WeaponAnimationValidator.ValidateForGeneration( document ).Issues.Any( x =>
 				x.Severity == ValidationSeverity.Warning && x.Code == "clip.fallback" ),
 			"Missing action clips must remain warnings." );
+		document.Source.SourcePath = "weapons/test/source.smd";
+		var smdValidation = WeaponAnimationValidator.ValidateForGeneration( document );
+		Check(
+			report,
+			smdValidation.Issues.Any( issue =>
+				issue.Blocking && issue.Code == "source.not_embeddable" ),
+			"SMD projects must explain the ModelDoc generation limitation before Generate runs." );
+		Check(
+			report,
+			smdValidation.Issues.Any( issue =>
+				issue.Code == "source.not_embeddable"
+				&& issue.Message.Contains( "SMD", StringComparison.Ordinal ) ),
+			"The generation-format diagnostic must name the unsupported source extension." );
+		document.Source.SourcePath = "weapons/test/source.vmdl";
+		Check(
+			report,
+			WeaponAnimationValidator.ValidateForGeneration( document ).Issues.All( issue =>
+				issue.Code != "source.not_embeddable" ),
+			"VMDL projects must pass source-format validation through the generated adapter path." );
+		document.Source.SourcePath = "weapons/test/source.fbx";
 		document.Calibration.Anchors.RemoveAll( anchor =>
 			anchor.Kind is AnchorKind.RearBore or AnchorKind.FrontBore );
 		Check(
 			report,
 			WeaponAnimationValidator.ValidateCalibration( document ).IsValid,
 			"Auto-align markers must not block an already-oriented weapon." );
+
+		document.Source.OriginalModelDimensions = Vector3.One;
+		document.Calibration.PhysicalTransform =
+			document.Calibration.PhysicalTransform.WithScale( 1 );
+		Check(
+			report,
+			WeaponAnimationValidator.ValidateCalibration( document ).Issues.Any( issue =>
+				issue.Code == "scale.implausible" ),
+			"Implausible-scale validation must use persisted source bounds without requiring a measurement." );
 
 		document.Rig.Bones.Add( new WeaponBoneDefinition { Name = "hand_R" } );
 			Check(
@@ -2443,11 +2613,12 @@ public static class WeaponAnimatorSelfTests
 				host,
 				ordered[0],
 				"Compiled dependants must be removed before the sources they consume." );
-			var lifecycleFiles = new[]
-			{
-				"weapon_sequence_idle.dmx",
-				"weapon_vm_bootstrap.vmdl",
-				"weapon.vanmgrph",
+				var lifecycleFiles = new[]
+				{
+					"weapon_sequence_idle.dmx",
+					"weapon_source_adapter.vmdl",
+					"weapon_vm_bootstrap.vmdl",
+					"weapon.vanmgrph",
 				"weapon_vm.vmdl",
 				"v_weapon.prefab"
 			};
@@ -2459,8 +2630,8 @@ public static class WeaponAnimatorSelfTests
 				"Generated sources must appear in dependency order so automatic compilation never observes a missing preview host." );
 			var removeOrder = AssetGenerationService.OrderForRemoval( lifecycleFiles ).ToList();
 			Equal(
-				report,
-				"v_weapon.prefab|weapon_vm.vmdl|weapon.vanmgrph|weapon_vm_bootstrap.vmdl|weapon_sequence_idle.dmx",
+					report,
+					"v_weapon.prefab|weapon_vm.vmdl|weapon.vanmgrph|weapon_vm_bootstrap.vmdl|weapon_source_adapter.vmdl|weapon_sequence_idle.dmx",
 				string.Join( "|", removeOrder ),
 				"Generated consumers must be removed in reverse dependency order." );
 			Check(
@@ -2982,6 +3153,118 @@ public static class WeaponAnimatorSelfTests
 			"VMDL inputs must receive the same tool-owned root normalization and branch filtering." );
 	}
 
+	private static void TestGenerationSourceAdapters( WeaponAnimatorSelfTestReport report )
+	{
+		var source = $$"""
+			{{ModelDocWriter.Header}}
+			{
+				rootNode =
+				{
+					_class = "RootNode"
+					children =
+					[
+						{
+							_class = "RenderMeshFile"
+							filename = "receiver.fbx"
+							import_translation = [ 2, 0, 0 ]
+							import_rotation = [ 0, 0, 0 ]
+							import_scale = 1
+						},
+						{
+							_class = "RenderMeshFile"
+							filename = "magazine.fbx"
+							import_translation = [ 0, 2, 0 ]
+							import_rotation = [ 0, 0, 0 ]
+							import_scale = 1
+						},
+					]
+				}
+			}
+			""";
+		var adapted = ModelDocWriter.WriteVmdlSourceAdapter(
+			source,
+			"root",
+			["foreign_arm"],
+			new Transform( new Vector3( 10, 0, 0 ), Rotation.Identity, 0.5f ) );
+		Check(
+			report,
+			Count( adapted, "import_scale = 0.5" ) == 2
+				&& adapted.Contains( "import_translation = [ 11, 0, 0 ]", StringComparison.Ordinal )
+				&& adapted.Contains( "import_translation = [ 10, 1, 0 ]", StringComparison.Ordinal )
+				&& adapted.Contains( "original_bone_name = \"root\"", StringComparison.Ordinal )
+				&& adapted.Contains( "\"foreign_arm\"", StringComparison.Ordinal ),
+			"A VMDL adapter must apply calibration to every render mesh while preserving filtering." );
+
+		var baseHost = ModelDocWriter.WriteHost(
+			"reference.dmx",
+			[],
+			"",
+			["weapon_root"],
+			baseModelPath: "weapons/test/source_adapter.vmdl" );
+		Check(
+			report,
+			baseHost.Contains(
+				"base_model_name = \"weapons/test/source_adapter.vmdl\"",
+				StringComparison.Ordinal ),
+			"Generated hosts must be able to derive their visible mesh from a VMDL adapter." );
+
+		var temporary = Path.Combine(
+			Path.GetTempPath(),
+			$"weaponanim-source-{Guid.NewGuid():N}.vmdl" );
+		File.WriteAllText( temporary, source );
+		try
+		{
+			var document = ValidDocument();
+			document.Source.SourcePath = temporary;
+			document.Source.CompiledModelPath = temporary;
+			document.Calibration.PhysicalTransform =
+				new Transform( Vector3.Zero, Rotation.Identity, 0.6f );
+			var progress = new List<GenerationProgress>();
+			var generated = AssetGenerationService.BuildFiles(
+				document,
+				HostSkeletonBuilder.Build( document, includeArmProfile: false ),
+				"weapons/test_weapon/viewmodel",
+				progress.Add );
+			Check(
+				report,
+				generated.ContainsKey( "test_weapon_source_adapter.vmdl" )
+					&& generated["test_weapon_vm.vmdl"].Contains(
+						"base_model_name = \"weapons/test_weapon/viewmodel/test_weapon_source_adapter.vmdl\"",
+						StringComparison.Ordinal ),
+				"VMDL source projects must generate a persistent calibrated adapter." );
+			Check(
+				report,
+				progress.Any( item =>
+					item.Stage == "Sequences"
+					&& item.Completed == 1
+					&& item.Total == 1 ),
+				"Generation must report deterministic per-sequence progress." );
+			using var cancellation = new System.Threading.CancellationTokenSource();
+			cancellation.Cancel();
+			var cancelled = false;
+			try
+			{
+				AssetGenerationService.BuildFiles(
+					document,
+					HostSkeletonBuilder.Build( document, includeArmProfile: false ),
+					"weapons/test_weapon/viewmodel",
+					cancellationToken: cancellation.Token );
+			}
+			catch ( OperationCanceledException )
+			{
+				cancelled = true;
+			}
+			Check(
+				report,
+				cancelled,
+				"Generation must honor cancellation before assembling or replacing output files." );
+		}
+		finally
+		{
+			File.Delete( temporary );
+		}
+	}
+
 	private static string DmxJointIdForTest( int index )
 	{
 		var bytes = System.Security.Cryptography.SHA256.HashData(
@@ -3078,8 +3361,24 @@ public static class WeaponAnimatorSelfTests
 		Check(
 			report,
 			generated.ContainsKey( "test_weapon_sequence_idle.dmx" )
-				&& !generated.ContainsKey( "test_weapon_idle.dmx" ),
-			"Generated clips must use the stable sequence namespace instead of legacy dependency paths." );
+				&& !generated.ContainsKey( "test_weapon_idle.dmx" )
+				&& !generated.ContainsKey( "test_weapon_sequence_fire.dmx" ),
+			"Generation must emit authored sequences only and leave missing action roles on Idle fallbacks." );
+
+		var custom = WeaponAnimationClip.Create( WeaponClipRole.Custom );
+		custom.Name = "Mechanical Check";
+		custom.Readiness = ClipReadiness.Draft;
+		document.Clips.Add( custom );
+		WeaponAnimationNames.RepairCustomSequenceNames( document );
+		generated = AssetGenerationService.BuildFiles(
+			document,
+			skeleton,
+			"weapons/test_weapon/viewmodel" );
+		Check(
+			report,
+			generated.ContainsKey(
+				$"test_weapon_sequence_{custom.GeneratedSequenceName}.dmx" ),
+			"Authored custom clips must use their persisted readable sequence name." );
 	}
 
 	private static void TestPartVisibility( WeaponAnimatorSelfTestReport report )

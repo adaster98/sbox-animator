@@ -27,10 +27,12 @@ public static class WeaponVisibilityEvaluator
 			return part.DefaultVisible;
 
 		var result = part.DefaultVisible;
-		foreach ( var key in track.Keys
-			.Where( x => x.Time <= time + TimeTolerance )
-			.OrderBy( x => x.Time ) )
+		foreach ( var key in track.Keys )
+		{
+			if ( key.Time > time + TimeTolerance )
+				break;
 			result = key.Visible;
+		}
 		return result;
 	}
 

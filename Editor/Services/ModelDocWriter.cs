@@ -1,9 +1,11 @@
 #nullable enable annotations
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using Sandbox;
 
 namespace SboxWeaponAnimator.Editor;
@@ -37,7 +39,9 @@ public static class ModelDocWriter
 		string animGraphPath,
 		IEnumerable<string> preservedBones,
 		HostWeaponMesh? weaponMesh = null,
-		IEnumerable<HostAttachment>? attachments = null )
+		IEnumerable<HostAttachment>? attachments = null,
+		string baseModelPath = "",
+		IEnumerable<HostMaterialRemap>? baseMaterialRemaps = null )
 	{
 		var animationNodes = new StringBuilder();
 		foreach ( var item in clips.OrderBy( x => x.Clip.Name ) )
@@ -71,8 +75,8 @@ public static class ModelDocWriter
 
 		var weaponMeshNode = BuildWeaponMeshNode( weaponMesh );
 		var materialGroup = BuildMaterialGroup(
-			weaponMesh is not null,
-			weaponMesh?.MaterialRemaps );
+			weaponMesh is not null || !string.IsNullOrWhiteSpace( baseModelPath ),
+			weaponMesh?.MaterialRemaps ?? baseMaterialRemaps );
 		var attachmentList = BuildAttachmentList( attachments );
 		var boneMarkupNodes = new StringBuilder();
 		foreach ( var boneName in preservedBones
@@ -146,7 +150,7 @@ public static class ModelDocWriter
 					model_archetype = ""
 					primary_associated_entity = ""
 					anim_graph_name = "{{animGraphPath}}"
-					base_model_name = ""
+					base_model_name = "{{Escape( baseModelPath )}}"
 				}
 			}
 			""";
@@ -377,8 +381,12 @@ public static class ModelDocWriter
 	public static string WriteVmdlSourceAdapter(
 		string sourceModelDoc,
 		string sourceRootBoneName,
-		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots = null )
+		System.Collections.Generic.IEnumerable<string>? excludedBranchRoots = null,
+		Transform? importTransform = null )
 	{
+		if ( importTransform is { } placement )
+			sourceModelDoc = ApplyRenderMeshImportTransform( sourceModelDoc, placement );
+
 		var modifierList = BuildSourceModifierList(
 			sourceRootBoneName,
 			excludedBranchRoots );
@@ -398,6 +406,157 @@ public static class ModelDocWriter
 		var insertion = "\n" + modifierList.Trim() + "\n";
 		return sourceModelDoc.Insert( openingBracket + 1, insertion );
 	}
+
+	internal static string ApplyRenderMeshImportTransform(
+		string sourceModelDoc,
+		Transform placement )
+	{
+		var blocks = new List<(int Start, int End)>();
+		var search = 0;
+		while ( true )
+		{
+			var classIndex = sourceModelDoc.IndexOf(
+				"_class = \"RenderMeshFile\"",
+				search,
+				StringComparison.Ordinal );
+			if ( classIndex < 0 )
+				break;
+			var opening = sourceModelDoc.LastIndexOf( '{', classIndex );
+			var closing = opening < 0 ? -1 : FindClosingBrace( sourceModelDoc, opening );
+			if ( opening < 0 || closing < 0 )
+				throw new InvalidOperationException(
+					"The source VMDL contains a malformed RenderMeshFile node." );
+			blocks.Add( (opening, closing + 1) );
+			search = closing + 1;
+		}
+
+		if ( blocks.Count == 0 )
+			throw new InvalidOperationException(
+				"The source VMDL does not contain an editable RenderMeshFile node." );
+
+		var result = new StringBuilder( sourceModelDoc );
+		foreach ( var (start, end) in blocks.OrderByDescending( block => block.Start ) )
+		{
+			var block = sourceModelDoc[start..end];
+			var sourceAngles = ReadVector( block, "import_rotation", Vector3.Zero );
+			var source = new Transform(
+				ReadVector( block, "import_translation", Vector3.Zero ),
+				Rotation.From( sourceAngles.x, sourceAngles.y, sourceAngles.z ),
+				new Vector3( ReadScalar( block, "import_scale", 1 ) ) );
+			var combined = new Transform(
+				placement.PointToWorld( source.Position ),
+				placement.Rotation * source.Rotation,
+				placement.Scale * source.Scale );
+			var angles = combined.Rotation.Angles();
+			block = ReplaceField(
+				block,
+				"import_translation",
+				$"[ {F( combined.Position.x )}, {F( combined.Position.y )}, {F( combined.Position.z )} ]" );
+			block = ReplaceField(
+				block,
+				"import_rotation",
+				$"[ {F( angles.pitch )}, {F( angles.yaw )}, {F( angles.roll )} ]" );
+			block = ReplaceField( block, "import_scale", F( combined.Scale.x ) );
+			result.Remove( start, end - start );
+			result.Insert( start, block );
+		}
+		return result.ToString();
+	}
+
+	private static string ReplaceField( string block, string name, string value )
+	{
+		var pattern = $@"(?m)^(\s*){Regex.Escape( name )}\s*=\s*(\[[^\]]*\]|[^\r\n]+)";
+		if ( Regex.IsMatch( block, pattern ) )
+			return new Regex( pattern ).Replace(
+				block,
+				$"${{1}}{name} = {value}",
+				1 );
+
+		var classLine = block.IndexOf(
+			"_class = \"RenderMeshFile\"",
+			StringComparison.Ordinal );
+		var lineEnd = classLine < 0 ? -1 : block.IndexOf( '\n', classLine );
+		if ( lineEnd < 0 )
+			throw new InvalidOperationException(
+				$"The source RenderMeshFile cannot receive '{name}'." );
+		var indentation = Regex.Match( block[(block.LastIndexOf( '\n', classLine ) + 1)..], @"^\s*" ).Value;
+		return block.Insert( lineEnd + 1, $"{indentation}{name} = {value}\n" );
+	}
+
+	private static Vector3 ReadVector( string block, string name, Vector3 fallback )
+	{
+		var match = Regex.Match(
+			block,
+			$@"(?m)^\s*{Regex.Escape( name )}\s*=\s*\[\s*({NumberPattern})\s*,\s*({NumberPattern})\s*,\s*({NumberPattern})\s*\]" );
+		return match.Success
+			? new Vector3(
+				ParseNumber( match.Groups[1].Value ),
+				ParseNumber( match.Groups[2].Value ),
+				ParseNumber( match.Groups[3].Value ) )
+			: fallback;
+	}
+
+	private static float ReadScalar( string block, string name, float fallback )
+	{
+		var match = Regex.Match(
+			block,
+			$@"(?m)^\s*{Regex.Escape( name )}\s*=\s*({NumberPattern})" );
+		return match.Success ? ParseNumber( match.Groups[1].Value ) : fallback;
+	}
+
+	private static float ParseNumber( string value ) =>
+		float.Parse( value, NumberStyles.Float, CultureInfo.InvariantCulture );
+
+	private static int FindClosingBrace( string text, int opening )
+	{
+		var depth = 0;
+		var quoted = false;
+		var escaped = false;
+		for ( var index = opening; index < text.Length; index++ )
+		{
+			var character = text[index];
+			if ( quoted )
+			{
+				if ( escaped )
+					escaped = false;
+				else if ( character == '\\' )
+					escaped = true;
+				else if ( character == '"' )
+					quoted = false;
+				continue;
+			}
+			if ( character == '"' )
+			{
+				quoted = true;
+				continue;
+			}
+			if ( character == '/' && index + 1 < text.Length )
+			{
+				if ( text[index + 1] == '/' )
+				{
+					index = text.IndexOf( '\n', index + 2 );
+					if ( index < 0 )
+						return -1;
+					continue;
+				}
+				if ( text[index + 1] == '*' )
+				{
+					index = text.IndexOf( "*/", index + 2, StringComparison.Ordinal );
+					if ( index < 0 )
+						return -1;
+					index++;
+					continue;
+				}
+			}
+			if ( character == '{' )
+				depth++;
+			else if ( character == '}' && --depth == 0 )
+				return index;
+		}
+		return -1;
+	}
+
+	private const string NumberPattern = @"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?";
 
 	private static string BuildSourceModifierList(
 		string sourceRootBoneName,

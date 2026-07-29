@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Editor;
 using Sandbox;
@@ -15,19 +16,31 @@ namespace SboxWeaponAnimator.Editor;
 public sealed class GenerationResult
 {
 	public bool Success { get; init; }
+	public bool Cancelled { get; init; }
 	public string OutputFolder { get; init; } = "";
 	public ValidationReport Validation { get; init; } = new();
 	public List<GenerationDiagnostic> Diagnostics { get; init; } = [];
 	public List<string> GeneratedFiles { get; init; } = [];
 }
 
+public sealed record GenerationProgress(
+	string Stage,
+	string Detail,
+	int Completed = 0,
+	int Total = 0 );
+
 public sealed class AssetGenerationService
 {
-	public const string GeneratorVersion = "2.0.1";
+	public const string GeneratorVersion = "2.1.0";
 	private const string ManifestFile = "weaponanim.manifest.json";
 
-	public async Task<GenerationResult> GenerateAsync( WeaponAnimationDocument document )
+	public async Task<GenerationResult> GenerateAsync(
+		WeaponAnimationDocument document,
+		Action<GenerationProgress>? progress = null,
+		CancellationToken cancellationToken = default )
 	{
+		cancellationToken.ThrowIfCancellationRequested();
+		progress?.Invoke( new GenerationProgress( "Validate", "Validating the weapon project" ) );
 		var validation = WeaponAnimationValidator.ValidateForGeneration( document );
 		if ( !validation.IsValid )
 			return Failed( validation, "generation.validation", "Generation is blocked by validation errors." );
@@ -67,9 +80,20 @@ public sealed class AssetGenerationService
 		IReadOnlyList<WeaponMaterialPipeline.GeneratedTextureCopy> textureCopies;
 		try
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+			progress?.Invoke( new GenerationProgress( "Prepare", "Building generated source files" ) );
 			skeleton = HostSkeletonBuilder.Build( document );
-			files = BuildFiles( document, skeleton, relativeRoot );
+			files = BuildFiles(
+				document,
+				skeleton,
+				relativeRoot,
+				progress,
+				cancellationToken );
 			textureCopies = WeaponMaterialPipeline.BuildOutputTextureCopies( document );
+		}
+		catch ( OperationCanceledException )
+		{
+			return CancelledResult( validation, outputRoot );
 		}
 		catch ( Exception ex )
 		{
@@ -120,6 +144,8 @@ public sealed class AssetGenerationService
 		var newFiles = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		try
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+			progress?.Invoke( new GenerationProgress( "Write", "Writing persistent generation sources" ) );
 			Directory.CreateDirectory( outputRoot );
 			PrepareCompiledConsumersForRewrite(
 				outputRoot,
@@ -136,7 +162,14 @@ public sealed class AssetGenerationService
 			VerifyGeneratedSources( outputRoot, generatedSourcePaths );
 			RegisterGeneratedDependencies( outputRoot, generatedSourcePaths );
 
-			await CompileAndInspectAsync( document, outputRoot, relativeRoot, skeleton, diagnostics );
+			await CompileAndInspectAsync(
+				document,
+				outputRoot,
+				relativeRoot,
+				skeleton,
+				diagnostics,
+				progress,
+				cancellationToken );
 			if ( diagnostics.Any( x => x.Severity == ValidationSeverity.Error ) )
 				throw new InvalidOperationException( "One or more generated assets failed to compile or reload." );
 
@@ -179,6 +212,7 @@ public sealed class AssetGenerationService
 				newFiles.Add( manifestPath );
 			AtomicFile.WriteAllText( manifestPath, Json.Serialize( manifest ) );
 			document.Manifest = manifest;
+			progress?.Invoke( new GenerationProgress( "Complete", "Generation completed" ) );
 
 			return new GenerationResult
 			{
@@ -192,12 +226,27 @@ public sealed class AssetGenerationService
 					.ToList()
 			};
 		}
+		catch ( OperationCanceledException )
+		{
+			RestoreGeneratedFiles( newFiles, backups );
+			Log.Info( "[Weapon Animator] generation cancelled; owned outputs were restored." );
+			diagnostics.Add( Diagnostic(
+				ValidationSeverity.Warning,
+				"generation.cancelled",
+				"Generation was cancelled and the previous owned outputs were restored." ) );
+			return new GenerationResult
+			{
+				Success = false,
+				Cancelled = true,
+				OutputFolder = outputRoot,
+				Validation = validation,
+				Diagnostics = diagnostics
+			};
+		}
 		catch ( Exception ex )
 		{
 			Log.Error( $"[Weapon Animator] generation rolled back: {ex}" );
-			DeleteGeneratedFiles( newFiles );
-			foreach ( var backup in backups )
-				File.WriteAllBytes( backup.Key, backup.Value );
+			RestoreGeneratedFiles( newFiles, backups );
 
 			diagnostics.Add( Diagnostic(
 				ValidationSeverity.Error,
@@ -296,16 +345,18 @@ public sealed class AssetGenerationService
 		var extension = Path.GetExtension( path ).ToLowerInvariant();
 		if ( !IsCompiledConsumer( path ) )
 			return 0;
-		if ( IsBootstrapHost( path ) )
+		if ( IsSourceAdapter( path ) )
 			return 3;
+		if ( IsBootstrapHost( path ) )
+			return 4;
 		return extension switch
 		{
 			".vtex" => 1,
 			".vmat" => 2,
-			".vanmgrph" => 4,
-			".vmdl" => 5,
-			".prefab" => 6,
-			_ => 7
+			".vanmgrph" => 5,
+			".vmdl" => 6,
+			".prefab" => 7,
+			_ => 8
 		};
 	}
 
@@ -329,17 +380,22 @@ public sealed class AssetGenerationService
 		|| IsCompiledConsumer( relativePath );
 
 	private static int ConsumerRemovalRank( string path ) =>
-		IsBootstrapHost( path )
+		IsSourceAdapter( path )
 			? 3
+			: IsBootstrapHost( path )
+				? 4
 			: Path.GetExtension( path ).ToLowerInvariant() switch
 			{
-				".prefab" => 6,
-				".vmdl" => 5,
-				".vanmgrph" => 4,
+				".prefab" => 7,
+				".vmdl" => 6,
+				".vanmgrph" => 5,
 				".vmat" => 2,
 				".vtex" => 1,
 				_ => 0
 			};
+
+	private static bool IsSourceAdapter( string path ) =>
+		path.EndsWith( "_source_adapter.vmdl", StringComparison.OrdinalIgnoreCase );
 
 	private static bool IsBootstrapHost( string path ) =>
 		path.EndsWith( "_host_bootstrap.vmdl", StringComparison.OrdinalIgnoreCase )
@@ -572,8 +628,11 @@ public sealed class AssetGenerationService
 	internal static Dictionary<string, string> BuildFiles(
 		WeaponAnimationDocument document,
 		HostSkeleton skeleton,
-		string relativeRoot )
+		string relativeRoot,
+		Action<GenerationProgress>? progress = null,
+		CancellationToken cancellationToken = default )
 	{
+		cancellationToken.ThrowIfCancellationRequested();
 		var slug = WeaponAnimationDocument.Slugify( document.Output.AssetName );
 		var files = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
 		var referenceName = $"{slug}_host_reference.dmx";
@@ -590,8 +649,17 @@ public sealed class AssetGenerationService
 		}
 
 		var clipSources = new List<(WeaponAnimationClip Clip, string Source)>();
-		foreach ( var clip in document.Clips.OrderBy( x => x.Name ) )
+		var generatedClips = GeneratedClips( document );
+		var orderedClips = generatedClips.OrderBy( x => x.Name ).ToArray();
+		for ( var clipIndex = 0; clipIndex < orderedClips.Length; clipIndex++ )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+			var clip = orderedClips[clipIndex];
+			progress?.Invoke( new GenerationProgress(
+				"Sequences",
+				$"Sampling {clip.Name}",
+				clipIndex + 1,
+				orderedClips.Length ) );
 			var clipName =
 				$"{slug}_sequence_{WeaponAnimationNames.SequenceName( clip )}.dmx";
 			files[clipName] = DmxWriter.WriteAnimation( document, skeleton, clip );
@@ -604,19 +672,45 @@ public sealed class AssetGenerationService
 		var placement = WeaponAnimationMath.Compose(
 			document.Calibration.PhysicalTransform,
 			document.Calibration.FramingTransform );
-		var weaponMesh = new HostWeaponMesh(
-			ResolveEmbeddableSourcePath( document ),
-			document.Source.SourceRootBoneName,
-			placement,
-			ExcludedBranchRoots( document ).ToArray(),
-			WeaponMaterialPipeline.OutputRemaps( document, relativeRoot ) );
+		var excludedBranches = ExcludedBranchRoots( document ).ToArray();
+		var materialRemaps = WeaponMaterialPipeline.OutputRemaps(
+			document,
+			relativeRoot );
+		HostWeaponMesh? weaponMesh = null;
+		var baseModelPath = "";
+		if ( IsVmdlSource( document ) )
+		{
+			var adapterName = $"{slug}_source_adapter.vmdl";
+			var sourceAbsolute = ResolveSourceAbsolutePath( document.Source.SourcePath );
+			if ( !File.Exists( sourceAbsolute ) )
+				throw new FileNotFoundException(
+					"The imported VMDL source no longer exists.",
+					sourceAbsolute );
+			files[adapterName] = ModelDocWriter.WriteVmdlSourceAdapter(
+				File.ReadAllText( sourceAbsolute ),
+				document.Source.SourceRootBoneName,
+				excludedBranches,
+				placement );
+			baseModelPath = $"{relativeRoot}/{adapterName}";
+		}
+		else
+		{
+			weaponMesh = new HostWeaponMesh(
+				ResolveEmbeddableSourcePath( document ),
+				document.Source.SourceRootBoneName,
+				placement,
+				excludedBranches,
+				materialRemaps );
+		}
 		var hostSource = ModelDocWriter.WriteHost(
 			$"{relativeRoot}/{referenceName}",
 			clipSources,
 			graphPath,
 			skeleton.Bones.Select( bone => bone.Name ),
 			weaponMesh,
-			BuildHostAttachments( document, skeleton ) );
+			BuildHostAttachments( document, skeleton ),
+			baseModelPath,
+			materialRemaps );
 		files[hostName] = hostSource;
 
 		if ( document.Output.GenerateGraph && document.Graph.GenerateGraph )
@@ -629,7 +723,9 @@ public sealed class AssetGenerationService
 				"",
 				skeleton.Bones.Select( bone => bone.Name ),
 				weaponMesh,
-				BuildHostAttachments( document, skeleton ) );
+				BuildHostAttachments( document, skeleton ),
+				baseModelPath,
+				materialRemaps );
 			files[graphName] = AnimGraphWriter.Write(
 				document,
 				$"{relativeRoot}/{bootstrapHostName}" );
@@ -646,15 +742,31 @@ public sealed class AssetGenerationService
 	private static string ResolveEmbeddableSourcePath( WeaponAnimationDocument document )
 	{
 		var extension = Path.GetExtension( document.Source.SourcePath );
-		if ( extension.Equals( ".fbx", StringComparison.OrdinalIgnoreCase )
-			|| extension.Equals( ".dmx", StringComparison.OrdinalIgnoreCase )
-			|| extension.Equals( ".obj", StringComparison.OrdinalIgnoreCase ) )
+		if ( WeaponSourceFormatSupport.CanGenerate( document.Source.SourcePath )
+			&& !extension.Equals( ".vmdl", StringComparison.OrdinalIgnoreCase ) )
 			return document.Source.SourcePath;
 
 		throw new InvalidOperationException(
-			$"The standard single-renderer viewmodel currently needs an FBX, DMX, or OBJ render source; "
+			$"The standard single-renderer viewmodel currently needs an FBX, DMX, OBJ, or VMDL render source; "
 			+ $"'{extension}' cannot be embedded by ModelDoc." );
 	}
+
+	internal static IReadOnlyList<WeaponAnimationClip> GeneratedClips(
+		WeaponAnimationDocument document ) =>
+		document.Clips
+			.Where( clip => clip.Readiness != ClipReadiness.NotStarted )
+			.ToArray();
+
+	private static bool IsVmdlSource( WeaponAnimationDocument document ) =>
+		Path.GetExtension( document.Source.SourcePath )
+			.Equals( ".vmdl", StringComparison.OrdinalIgnoreCase );
+
+	private static string ResolveSourceAbsolutePath( string sourcePath ) =>
+		Path.IsPathRooted( sourcePath )
+			? Path.GetFullPath( sourcePath )
+			: Path.GetFullPath( Path.Combine(
+				WeaponSourceImporter.GetContentRoot(),
+				sourcePath.TrimStart( '/', '\\' ) ) );
 
 	private static IEnumerable<HostAttachment> BuildHostAttachments(
 		WeaponAnimationDocument document,
@@ -722,8 +834,10 @@ public sealed class AssetGenerationService
 	/// </summary>
 	internal static async Task<bool> WaitForCompileAsync(
 		Asset asset,
-		string sourceAbsolute )
+		string sourceAbsolute,
+		CancellationToken cancellationToken = default )
 	{
+		cancellationToken.ThrowIfCancellationRequested();
 		var queued = asset.Compile( true );
 		Log.Info(
 			$"[Weapon Animator] compile request for '{asset.Path}': queued={queued}, "
@@ -735,6 +849,7 @@ public sealed class AssetGenerationService
 		var retriedLiveAsset = false;
 		while ( true )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
 			// Asset.Delete followed by RegisterFile can leave callers holding the retired managed
 			// wrapper while the directory watcher has already created and compiled a replacement.
 			var current = AssetSystem.FindByPath( sourceAbsolute ) ?? asset;
@@ -788,7 +903,7 @@ public sealed class AssetGenerationService
 				nextProgressLog = DateTime.UtcNow.AddSeconds( 5 );
 			}
 
-			await Task.Delay( 16 );
+			await Task.Delay( 16, cancellationToken );
 		}
 	}
 
@@ -832,16 +947,35 @@ public sealed class AssetGenerationService
 		string outputRoot,
 		string relativeRoot,
 		HostSkeleton skeleton,
-		List<GenerationDiagnostic> diagnostics )
+		List<GenerationDiagnostic> diagnostics,
+		Action<GenerationProgress>? progress,
+		CancellationToken cancellationToken )
 	{
 		var slug = WeaponAnimationDocument.Slugify( document.Output.AssetName );
 		var bootstrapHostFile = $"{slug}_vm_bootstrap.vmdl";
 		var hostFile = $"{slug}_vm.vmdl";
 		var graphEnabled = document.Output.GenerateGraph && document.Graph.GenerateGraph;
 		var hostAbsolute = Path.Combine( outputRoot, hostFile );
+		var materialSources = WeaponMaterialPipeline.BuildOutputTextFiles(
+			document,
+			relativeRoot );
+		var materialCount = materialSources.Keys.Count( path =>
+			Path.GetExtension( path ).Equals( ".vmat", StringComparison.OrdinalIgnoreCase ) );
+		var compileTotal = materialCount
+			+ (IsVmdlSource( document ) ? 1 : 0)
+			+ (graphEnabled ? 3 : 1)
+			+ (document.Output.GeneratePrefab ? 1 : 0);
+		var compileIndex = 0;
 
 		async Task<bool> Compile( string file, string? description = null )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+			compileIndex++;
+			progress?.Invoke( new GenerationProgress(
+				"Compile",
+				description ?? file,
+				compileIndex,
+				compileTotal ) );
 			var absolute = Path.Combine( outputRoot, file );
 			var asset = AssetSystem.RegisterFile( absolute );
 			if ( asset is null )
@@ -855,7 +989,10 @@ public sealed class AssetGenerationService
 				return false;
 			}
 
-			if ( await WaitForCompileAsync( asset, absolute ) )
+			if ( await WaitForCompileAsync(
+				asset,
+				absolute,
+				cancellationToken ) )
 			{
 				diagnostics.Add( Diagnostic(
 					ValidationSeverity.Info,
@@ -874,18 +1011,22 @@ public sealed class AssetGenerationService
 			return false;
 		}
 
-		var materialSources = WeaponMaterialPipeline.BuildOutputTextFiles(
-			document,
-			relativeRoot );
 		foreach ( var materialFile in materialSources.Keys
 			.Where( path => Path.GetExtension( path ).Equals(
 				".vmat",
 				StringComparison.OrdinalIgnoreCase ) )
 			.OrderBy( path => path, StringComparer.OrdinalIgnoreCase ) )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
 			if ( !await Compile( materialFile, $"{materialFile} material" ) )
 				return;
 		}
+
+		if ( IsVmdlSource( document )
+			&& !await Compile(
+				$"{slug}_source_adapter.vmdl",
+				$"{slug}_source_adapter.vmdl source adapter" ) )
+			return;
 
 		var hostCompiled = false;
 		if ( graphEnabled )
@@ -921,7 +1062,8 @@ public sealed class AssetGenerationService
 		var host = await ReloadGeneratedHostAsync(
 			hostAbsolute,
 			hostPath,
-			skeleton );
+			skeleton,
+			cancellationToken );
 		var missingRequiredBones = host is null || host.IsError
 			? skeleton.Bones.Select( bone => bone.Name ).ToArray()
 			: MissingRequiredBones( skeleton, host );
@@ -999,7 +1141,7 @@ public sealed class AssetGenerationService
 			.Select( host.GetAnimationName )
 			.Where( name => !string.IsNullOrWhiteSpace( name ) )
 			.ToHashSet( StringComparer.OrdinalIgnoreCase );
-		var expectedSequences = document.Clips
+		var expectedSequences = GeneratedClips( document )
 			.Select( WeaponAnimationNames.SequenceName )
 			.Distinct( StringComparer.OrdinalIgnoreCase )
 			.ToArray();
@@ -1059,13 +1201,17 @@ public sealed class AssetGenerationService
 		// Compile the prefab only after its model and graph have reloaded successfully. This keeps
 		// a transient model-cache delay from producing and then rolling back a dependent prefab.
 		if ( document.Output.GeneratePrefab )
+		{
+			cancellationToken.ThrowIfCancellationRequested();
 			await Compile( $"v_{slug}.prefab" );
+		}
 	}
 
 	private static async Task<Model?> ReloadGeneratedHostAsync(
 		string hostAbsolute,
 		string hostPath,
-		HostSkeleton skeleton )
+		HostSkeleton skeleton,
+		CancellationToken cancellationToken )
 	{
 		var expectedBoneCount = skeleton.Bones.Count;
 		var started = DateTime.UtcNow;
@@ -1075,10 +1221,11 @@ public sealed class AssetGenerationService
 
 		while ( DateTime.UtcNow <= deadline )
 		{
+			cancellationToken.ThrowIfCancellationRequested();
 			var asset = AssetSystem.FindByPath( hostAbsolute );
 			// Successful compilation can precede resource hotload by several frames. Reacquire
 			// both the Asset and Model until the replacement resource is visible.
-			await Task.Delay( 50 );
+			await Task.Delay( 50, cancellationToken );
 			try
 			{
 				last = asset?.LoadResource<Model>() ?? Model.Load( hostPath );
@@ -1350,6 +1497,55 @@ public sealed class AssetGenerationService
 	private static string HashText( string value ) =>
 		Convert.ToHexString( SHA256.HashData( Encoding.UTF8.GetBytes( value ) ) )
 			.ToLowerInvariant();
+
+	private static void RestoreGeneratedFiles(
+		IEnumerable<string> newFiles,
+		IReadOnlyDictionary<string, byte[]> backups )
+	{
+		DeleteGeneratedFiles( newFiles );
+		foreach ( var backup in backups )
+		{
+			var directory = Path.GetDirectoryName( backup.Key );
+			if ( !string.IsNullOrWhiteSpace( directory ) )
+				Directory.CreateDirectory( directory );
+			File.WriteAllBytes( backup.Key, backup.Value );
+		}
+
+		// Consumer compiled files were deliberately removed before rewriting. Re-register their
+		// restored sources so cancellation leaves the previous viewmodel usable after recompilation.
+		foreach ( var source in OrderForWrite(
+			backups.Keys.Where( IsCompiledConsumer ) ) )
+		{
+			try
+			{
+				var asset = AssetSystem.RegisterFile( source )
+					?? AssetSystem.FindByPath( source );
+				asset?.Compile( true );
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning(
+					$"[Weapon Animator] could not requeue restored asset '{source}': {ex.Message}" );
+			}
+		}
+	}
+
+	private static GenerationResult CancelledResult(
+		ValidationReport validation,
+		string outputFolder = "" ) => new()
+	{
+		Success = false,
+		Cancelled = true,
+		OutputFolder = outputFolder,
+		Validation = validation,
+		Diagnostics =
+		[
+			Diagnostic(
+				ValidationSeverity.Warning,
+				"generation.cancelled",
+				"Generation was cancelled before any output files were changed." )
+		]
+	};
 
 	private static GenerationResult Failed(
 		ValidationReport validation,

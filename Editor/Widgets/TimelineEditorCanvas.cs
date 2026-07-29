@@ -49,21 +49,21 @@ internal sealed class TimelineEditorCanvas : Widget
 		Layout.Add( _tracks, 1 );
 		Layout.Add( _curves, 1 );
 
-		_controller.DocumentChanged += Refresh;
-		_controller.PoseChanged += Refresh;
-		_controller.SelectionChanged += Refresh;
+		_controller.DocumentChanged += RefreshDocument;
+		_controller.PoseChanged += RefreshCurveData;
+		_controller.KeySelectionChanged += Refresh;
 		_controller.TimelineChanged += Refresh;
-		_controller.TimelineViewChanged += Refresh;
+		_controller.TimelineViewChanged += RefreshTimelineView;
 		_controller.PlaybackChanged += Refresh;
 	}
 
 	public override void OnDestroyed()
 	{
-		_controller.DocumentChanged -= Refresh;
-		_controller.PoseChanged -= Refresh;
-		_controller.SelectionChanged -= Refresh;
+		_controller.DocumentChanged -= RefreshDocument;
+		_controller.PoseChanged -= RefreshCurveData;
+		_controller.KeySelectionChanged -= Refresh;
 		_controller.TimelineChanged -= Refresh;
-		_controller.TimelineViewChanged -= Refresh;
+		_controller.TimelineViewChanged -= RefreshTimelineView;
 		_controller.PlaybackChanged -= Refresh;
 		base.OnDestroyed();
 	}
@@ -161,6 +161,24 @@ internal sealed class TimelineEditorCanvas : Widget
 		_tracks.Refresh();
 		_curves.Refresh();
 		Update();
+	}
+
+	private void RefreshDocument()
+	{
+		_curves.InvalidateData();
+		Refresh();
+	}
+
+	private void RefreshCurveData()
+	{
+		_curves.InvalidateData();
+		Refresh();
+	}
+
+	private void RefreshTimelineView()
+	{
+		_curves.InvalidateView();
+		Refresh();
 	}
 }
 

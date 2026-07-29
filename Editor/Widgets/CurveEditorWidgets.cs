@@ -230,6 +230,10 @@ internal sealed class CurveEditorArea : Widget
 		_axis.Update();
 		_graph.Refresh();
 	}
+
+	public void InvalidateData() => _graph.InvalidateData();
+
+	public void InvalidateView() => _graph.InvalidateView();
 }
 
 internal sealed class CurveTrackList : BaseScrollWidget
@@ -503,9 +507,19 @@ internal sealed class CurveGraphWidget : Widget
 
 	public void Refresh()
 	{
+		Update();
+	}
+
+	public void InvalidateData()
+	{
 		_channelSamples = null;
 		_automaticRange = null;
-		Update();
+	}
+
+	public void InvalidateView()
+	{
+		// Horizontal range and channel changes are part of the sample cache key.
+		_automaticRange = null;
 	}
 
 	protected override void OnResize()

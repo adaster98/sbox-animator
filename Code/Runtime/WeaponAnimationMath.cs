@@ -23,8 +23,6 @@ public readonly record struct TwoBoneSolution(
 	Vector3 Root,
 	Vector3 Elbow,
 	Vector3 End,
-	Rotation UpperRotation,
-	Rotation LowerRotation,
 	bool Reachable,
 	float RequestedDistance,
 	float SolvedDistance );
@@ -115,77 +113,89 @@ public static class WeaponAnimationMath
 		if ( track.Keys.Count == 0 || track.Muted )
 			return fallback;
 
-		var ordered = track.Keys.OrderBy( x => x.Time ).ToArray();
-		if ( time <= ordered[0].Time )
-			return KeyTransform( ordered[0] );
-		if ( time >= ordered[^1].Time )
-			return KeyTransform( ordered[^1] );
+		var keys = track.Keys;
+		if ( time <= keys[0].Time )
+			return KeyTransform( keys[0] );
+		if ( time >= keys[^1].Time )
+			return KeyTransform( keys[^1] );
 
-		for ( var i = 0; i < ordered.Length - 1; i++ )
+		var low = 0;
+		var high = keys.Count - 1;
+		while ( low < high )
 		{
-			var current = ordered[i];
-			var next = ordered[i + 1];
-			if ( time < current.Time || time > next.Time )
-				continue;
-
-			var duration = MathF.Max( next.Time - current.Time, Epsilon );
-			var fraction = Math.Clamp( (time - current.Time) / duration, 0.0f, 1.0f );
-			var span = track.FindCurveSpan( current.Id, next.Id );
-			var interpolation = span?.HasInterpolationOverride == true
-				? span.Interpolation
-				: track.Interpolation;
-			var hasSpeedCurve = span?.HasSpeedCurve == true;
-			if ( interpolation == TrackInterpolation.Stepped && !hasSpeedCurve )
-				return KeyTransform( current );
-
-			var progress = hasSpeedCurve
-				? SampleMotionProgress( span.Speed, fraction )
-				: fraction;
-			var valueInterpolation = hasSpeedCurve
-				? TrackInterpolation.Linear
-				: interpolation;
-			if ( span is null || span.CustomChannels == TransformCurveChannel.None )
-			{
-				if ( valueInterpolation == TrackInterpolation.Cubic )
-					progress = SmoothStep( progress );
-
-				return new Transform(
-					Vector3.Lerp( current.Position, next.Position, progress ),
-					Rotation.Slerp( current.Rotation, next.Rotation, progress ),
-					Vector3.Lerp( current.Scale, next.Scale, progress ) );
-			}
-
-			return new Transform(
-				SampleVectorChannels(
-					current.Position,
-					next.Position,
-					current.CurveTangents.PositionOut,
-					next.CurveTangents.PositionIn,
-					span.CustomChannels,
-					TransformCurveChannel.PositionX,
-					progress,
-					duration,
-					valueInterpolation ),
-				SampleRotationChannels(
-					current,
-					next,
-					span,
-					progress,
-					duration,
-					valueInterpolation ),
-				SampleVectorChannels(
-					current.Scale,
-					next.Scale,
-					current.CurveTangents.ScaleOut,
-					next.CurveTangents.ScaleIn,
-					span.CustomChannels,
-					TransformCurveChannel.ScaleX,
-					progress,
-					duration,
-					valueInterpolation ) );
+			var middle = low + (high - low) / 2;
+			if ( keys[middle].Time < time )
+				low = middle + 1;
+			else
+				high = middle;
 		}
 
-		return fallback;
+		if ( MathF.Abs( keys[low].Time - time ) <= Epsilon )
+			return KeyTransform( keys[low] );
+		return SampleSpan( track, keys[low - 1], keys[low], time );
+	}
+
+	private static Transform SampleSpan(
+		TransformTrack track,
+		TransformKey current,
+		TransformKey next,
+		float time )
+	{
+		var duration = MathF.Max( next.Time - current.Time, Epsilon );
+		var fraction = Math.Clamp( (time - current.Time) / duration, 0.0f, 1.0f );
+		var span = track.FindCurveSpan( current.Id, next.Id );
+		var interpolation = span?.HasInterpolationOverride == true
+			? span.Interpolation
+			: track.Interpolation;
+		var hasSpeedCurve = span?.HasSpeedCurve == true;
+		if ( interpolation == TrackInterpolation.Stepped && !hasSpeedCurve )
+			return KeyTransform( current );
+
+		var progress = hasSpeedCurve
+			? SampleMotionProgress( span!.Speed, fraction )
+			: fraction;
+		var valueInterpolation = hasSpeedCurve
+			? TrackInterpolation.Linear
+			: interpolation;
+		if ( span is null || span.CustomChannels == TransformCurveChannel.None )
+		{
+			if ( valueInterpolation == TrackInterpolation.Cubic )
+				progress = SmoothStep( progress );
+
+			return new Transform(
+				Vector3.Lerp( current.Position, next.Position, progress ),
+				Rotation.Slerp( current.Rotation, next.Rotation, progress ),
+				Vector3.Lerp( current.Scale, next.Scale, progress ) );
+		}
+
+		return new Transform(
+			SampleVectorChannels(
+				current.Position,
+				next.Position,
+				current.CurveTangents.PositionOut,
+				next.CurveTangents.PositionIn,
+				span.CustomChannels,
+				TransformCurveChannel.PositionX,
+				progress,
+				duration,
+				valueInterpolation ),
+			SampleRotationChannels(
+				current,
+				next,
+				span,
+				progress,
+				duration,
+				valueInterpolation ),
+			SampleVectorChannels(
+				current.Scale,
+				next.Scale,
+				current.CurveTangents.ScaleOut,
+				next.CurveTangents.ScaleIn,
+				span.CustomChannels,
+				TransformCurveChannel.ScaleX,
+				progress,
+				duration,
+				valueInterpolation ) );
 	}
 
 	public static float SampleMotionRate( MotionRateCurve curve, float fraction )
@@ -297,15 +307,10 @@ public static class WeaponAnimationMath
 			+ solvedDistance * solvedDistance ) / (2.0f * solvedDistance);
 		var heightSquared = MathF.Max( upperLength * upperLength - along * along, 0 );
 		var elbow = root + direction * along + poleDirection * MathF.Sqrt( heightSquared );
-		var upperRotation = Rotation.LookAt( (elbow - root).Normal, poleDirection );
-		var lowerRotation = Rotation.LookAt( (solvedEnd - elbow).Normal, poleDirection );
-
 		return new TwoBoneSolution(
 			root,
 			elbow,
 			solvedEnd,
-			upperRotation,
-			lowerRotation,
 			reachable,
 			requestedDistance,
 			solvedDistance );

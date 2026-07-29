@@ -201,18 +201,10 @@ public static class AnimationPoseEvaluator
 		string target,
 		string suffix )
 	{
-		var visited = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
-		var current = target;
-		while ( !string.IsNullOrWhiteSpace( current ) && visited.Add( current ) )
-		{
-			if ( current.EndsWith( suffix, StringComparison.OrdinalIgnoreCase ) )
-				return true;
-			if ( !skeleton.ByName.TryGetValue( current, out var bone ) )
-				break;
-			current = bone.ParentName;
-		}
-
-		return false;
+		return skeleton.ByName.TryGetValue( target, out var bone )
+			&& bone.ArmSide == (suffix.Equals(
+				"_R",
+				StringComparison.OrdinalIgnoreCase ) ? 1 : -1);
 	}
 
 	private static void BuildModelTransforms(
@@ -291,8 +283,7 @@ public static class AnimationPoseEvaluator
 		if ( !visited.Add( parentName ) || !model.TryGetValue( parentName, out var parent ) )
 			return;
 
-		foreach ( var child in skeleton.Bones.Where( bone =>
-			bone.ParentName.Equals( parentName, StringComparison.OrdinalIgnoreCase ) ) )
+		foreach ( var child in skeleton.ChildrenOf( parentName ) )
 		{
 			if ( !solvedBones.Contains( child.Name )
 				&& local.TryGetValue( child.Name, out var childLocal ) )

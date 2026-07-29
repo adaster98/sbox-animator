@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using Sandbox;
 
 namespace SboxWeaponAnimator.Editor;
@@ -17,22 +18,38 @@ public sealed class HostBone
 	public bool HasExplicitBindLocal { get; set; }
 	public bool IsWeaponBone { get; set; }
 	public string SourceBoneId { get; set; } = "";
+	public int ArmSide { get; set; }
 }
 
 public sealed class HostSkeleton
 {
 	public List<HostBone> Bones { get; } = [];
 	public Dictionary<string, HostBone> ByName { get; } = new( StringComparer.OrdinalIgnoreCase );
+	public Dictionary<string, List<HostBone>> ChildrenByParent { get; } =
+		new( StringComparer.OrdinalIgnoreCase );
 
 	public void Add( HostBone bone )
 	{
 		if ( ByName.ContainsKey( bone.Name ) )
 			return;
 
+		bone.ArmSide = DirectArmSide( bone.Name );
+		if ( bone.ArmSide == 0
+			&& ByName.TryGetValue( bone.ParentName, out var parent ) )
+			bone.ArmSide = parent.ArmSide;
 		bone.Index = Bones.Count;
 		Bones.Add( bone );
 		ByName.Add( bone.Name, bone );
+		if ( !ChildrenByParent.TryGetValue( bone.ParentName, out var children ) )
+		{
+			children = [];
+			ChildrenByParent[bone.ParentName] = children;
+		}
+		children.Add( bone );
 	}
+
+	public IReadOnlyList<HostBone> ChildrenOf( string parentName ) =>
+		ChildrenByParent.GetValueOrDefault( parentName ) ?? [];
 
 	public Transform GetBindLocal( HostBone bone )
 	{
@@ -79,6 +96,20 @@ public sealed class HostSkeleton
 			throw new InvalidOperationException(
 				$"The animation host contains a cyclic bone hierarchy near '{pending[0].Name}'." );
 		}
+
+		ChildrenByParent.Clear();
+		foreach ( var bone in Bones )
+		{
+			if ( !ChildrenByParent.TryGetValue( bone.ParentName, out var children ) )
+			{
+				children = [];
+				ChildrenByParent[bone.ParentName] = children;
+			}
+			children.Add( bone );
+		}
+
+		foreach ( var bone in Bones )
+			bone.ArmSide = ResolveArmSide( bone );
 	}
 
 	public IReadOnlyDictionary<string, Transform> BuildCompilerBindModelTransforms()
@@ -107,12 +138,57 @@ public sealed class HostSkeleton
 		parent.PointToWorld( local.Position ),
 		parent.Rotation * local.Rotation,
 		parent.Scale * local.Scale );
+
+	private int ResolveArmSide( HostBone bone )
+	{
+		var current = bone;
+		for ( var depth = 0; depth <= Bones.Count; depth++ )
+		{
+			var direct = DirectArmSide( current.Name );
+			if ( direct != 0 )
+				return direct;
+			if ( string.IsNullOrWhiteSpace( current.ParentName )
+				|| !ByName.TryGetValue( current.ParentName, out current ) )
+				return 0;
+			if ( current.ArmSide != 0 )
+				return current.ArmSide;
+		}
+		return 0;
+	}
+
+	private static int DirectArmSide( string name ) =>
+		name.EndsWith( "_R", StringComparison.OrdinalIgnoreCase )
+			? 1
+			: name.EndsWith( "_L", StringComparison.OrdinalIgnoreCase )
+				? -1
+				: 0;
 }
 
 public static class HostSkeletonBuilder
 {
 	public const string ProductionArmsModel = "models/first_person/v_first_person_arms_human.vmdl";
 	public const string PreviewArmsModel = "models/first_person/first_person_arms_preview.vmdl";
+	private static readonly Dictionary<(Guid DocumentId, bool Arms), CachedHostSkeleton>
+		SkeletonCache = [];
+
+	public static HostSkeleton BuildCached(
+		WeaponAnimationDocument document,
+		bool includeArmProfile = true )
+	{
+		var key = (document.DocumentId, includeArmProfile);
+		var signature = CacheSignature( document, includeArmProfile );
+		if ( SkeletonCache.TryGetValue( key, out var cached )
+			&& cached.Signature.Equals( signature, StringComparison.Ordinal ) )
+			return cached.Skeleton;
+
+		var skeleton = Build( document, includeArmProfile );
+		if ( SkeletonCache.Count >= 8 && !SkeletonCache.ContainsKey( key ) )
+			SkeletonCache.Clear();
+		SkeletonCache[key] = new CachedHostSkeleton( signature, skeleton );
+		return skeleton;
+	}
+
+	public static void ClearCache() => SkeletonCache.Clear();
 
 	public static HostSkeleton Build(
 		WeaponAnimationDocument document,
@@ -296,6 +372,49 @@ public static class HostSkeletonBuilder
 		return preview is not null && !preview.IsError ? preview : null;
 	}
 
+	private static string CacheSignature(
+		WeaponAnimationDocument document,
+		bool includeArmProfile )
+	{
+		var builder = new StringBuilder( 256 + document.Rig.Bones.Count * 128 );
+		builder.Append( includeArmProfile ).Append( '|' )
+			.Append( document.Rig.SourceSkeletonRootId ).Append( '|' );
+		AppendTransform( builder, document.Calibration.PhysicalTransform );
+		AppendTransform( builder, document.Calibration.FramingTransform );
+		AppendTransform( builder, document.Binding.PrimaryHand.Transform );
+		AppendTransform( builder, document.Binding.SupportHand.Transform );
+		foreach ( var bone in document.Rig.Bones )
+		{
+			builder.Append( '\n' )
+				.Append( bone.Id ).Append( '|' )
+				.Append( bone.Name ).Append( '|' )
+				.Append( bone.ParentId ).Append( '|' )
+				.Append( bone.ParentName ).Append( '|' )
+				.Append( bone.Classification ).Append( '|' )
+				.Append( bone.Inclusion ).Append( '|' );
+			AppendTransform( builder, bone.BindModelTransform );
+			AppendTransform( builder, bone.BindLocalTransform );
+		}
+		return builder.ToString();
+	}
+
+	private static void AppendTransform( StringBuilder builder, Transform transform )
+	{
+		AppendFloat( builder, transform.Position.x );
+		AppendFloat( builder, transform.Position.y );
+		AppendFloat( builder, transform.Position.z );
+		AppendFloat( builder, transform.Rotation.x );
+		AppendFloat( builder, transform.Rotation.y );
+		AppendFloat( builder, transform.Rotation.z );
+		AppendFloat( builder, transform.Rotation.w );
+		AppendFloat( builder, transform.Scale.x );
+		AppendFloat( builder, transform.Scale.y );
+		AppendFloat( builder, transform.Scale.z );
+	}
+
+	private static void AppendFloat( StringBuilder builder, float value ) =>
+		builder.Append( BitConverter.SingleToInt32Bits( value ) ).Append( ',' );
+
 	private static Transform ApplyPlacement( Transform placement, Transform sourceModel )
 	{
 		return new Transform(
@@ -399,6 +518,8 @@ public static class HostSkeletonBuilder
 			yield break;
 		}
 	}
+
+	private sealed record CachedHostSkeleton( string Signature, HostSkeleton Skeleton );
 }
 
 public sealed record BindParityIssue(

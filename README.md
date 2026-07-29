@@ -142,6 +142,8 @@ Generation can produce:
 - An optional Facepunch-compatible AnimGraph.
 
 Only files owned by the Weapon Animator are replaced when generating again.
+The Generate button becomes **Cancel** while work is in progress and safely restores the previous
+generated files if generation is stopped.
 
 ## Beta limitations
 
@@ -150,6 +152,8 @@ Only files owned by the Weapon Animator are replaced when generating again.
 - Weapon rigs vary considerably, so hierarchy filtering and hand placement require manual review.
 - Imported foreign character meshes are not automatically removed from the source model.
 - Missing action clips may use idle or no-op fallbacks; Idle is required for generation.
+- SMD models can be imported for rig review and authoring, but S&box ModelDoc cannot embed their
+  render geometry in a generated viewmodel. Re-export the source as FBX or DMX before generation.
 
 ## Reporting problems
 

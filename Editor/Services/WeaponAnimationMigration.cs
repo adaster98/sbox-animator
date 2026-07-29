@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Sandbox;
 
 namespace SboxWeaponAnimator.Editor;
 
@@ -13,11 +14,20 @@ public sealed class WeaponAnimationMigrationResult
 	public bool CurveSchemaMigrated { get; init; }
 	public bool RepairedLegacyIdle { get; init; }
 	public bool RepairedMaterialMetadata { get; init; }
+	public bool RepairedSequenceNames { get; init; }
+	public bool RepairedSourceDimensions { get; init; }
+	public bool RepairedKeyOrder { get; init; }
 	public int SourceSchemaVersion { get; init; }
 	public int PreservedWeaponTracks { get; init; }
 	public int RemovedTracks { get; init; }
 	public int RemovedConstraints { get; init; }
-	public bool Changed => Migrated || RepairedLegacyIdle || RepairedMaterialMetadata;
+	public bool Changed =>
+		Migrated
+		|| RepairedLegacyIdle
+		|| RepairedMaterialMetadata
+		|| RepairedSequenceNames
+		|| RepairedSourceDimensions
+		|| RepairedKeyOrder;
 
 	public string Summary
 	{
@@ -40,6 +50,21 @@ public sealed class WeaponAnimationMigrationResult
 			{
 				return "Repaired a legacy Idle bind pose that stored weapon bones in model space. "
 					+ "The original version will be backed up when this project is saved.";
+			}
+			if ( RepairedSequenceNames )
+			{
+				return "Assigned stable, readable sequence names to custom clips. "
+					+ "The original version will be backed up when saved.";
+			}
+			if ( RepairedSourceDimensions )
+			{
+				return "Recovered source-model dimensions for calibration validation. "
+					+ "The original version will be backed up when saved.";
+			}
+			if ( RepairedKeyOrder )
+			{
+				return "Normalized animation key order for efficient playback. "
+					+ "The original version will be backed up when saved.";
 			}
 			return RepairedMaterialMetadata
 				? "Repaired imported material slot metadata so source labels are not treated "
@@ -72,6 +97,8 @@ public static class WeaponAnimationMigration
 		var removedTracks = 0;
 		var removedConstraints = 0;
 		var repairedMaterialMetadata = false;
+		var repairedSourceDimensions = false;
+		var repairedKeyOrder = false;
 		foreach ( var material in document.Source.Materials )
 		{
 			var storedSlot = WeaponMaterialPipeline.StoredMaterialSlot(
@@ -82,6 +109,25 @@ public static class WeaponAnimationMigration
 			{
 				material.SourceMaterialPath = storedSlot;
 				repairedMaterialMetadata = true;
+			}
+		}
+		if ( document.Source.OriginalModelDimensions.Length <= 0
+			&& !string.IsNullOrWhiteSpace( document.Source.CompiledModelPath ) )
+		{
+			try
+			{
+				var sourceModel = Model.Load( document.Source.CompiledModelPath );
+				if ( sourceModel is not null
+					&& !sourceModel.IsError
+					&& sourceModel.Bounds.Size.Length > 0 )
+				{
+					document.Source.OriginalModelDimensions = sourceModel.Bounds.Size;
+					repairedSourceDimensions = true;
+				}
+			}
+			catch
+			{
+				// The preview recovery path can populate this after the missing asset returns.
 			}
 		}
 
@@ -155,6 +201,8 @@ public static class WeaponAnimationMigration
 
 		foreach ( var track in document.Clips.SelectMany( x => x.Tracks ) )
 		{
+			repairedKeyOrder |= !KeysAreSorted( track.Keys.Select( key => key.Time ) );
+			track.Keys.Sort( ( left, right ) => left.Time.CompareTo( right.Time ) );
 			foreach ( var key in track.Keys )
 			{
 				key.CurveTangents ??= new TransformCurveTangents();
@@ -166,6 +214,13 @@ public static class WeaponAnimationMigration
 			}
 			WeaponAnimationMath.RepairCurveSpans( track );
 		}
+		foreach ( var track in document.Clips.SelectMany( x => x.VisibilityTracks ) )
+		{
+			repairedKeyOrder |= !KeysAreSorted( track.Keys.Select( key => key.Time ) );
+			track.Keys.Sort( ( left, right ) => left.Time.CompareTo( right.Time ) );
+		}
+		var repairedSequenceNames =
+			WeaponAnimationNames.RepairCustomSequenceNames( document );
 
 		var repairedLegacyIdle = !separatedRigMigration && RepairLegacyIdleBindPose( document );
 		document.SchemaVersion = WeaponAnimationDocument.CurrentSchemaVersion;
@@ -183,11 +238,28 @@ public static class WeaponAnimationMigration
 			CurveSchemaMigrated = curveSchemaMigration,
 			RepairedLegacyIdle = repairedLegacyIdle,
 			RepairedMaterialMetadata = repairedMaterialMetadata,
+			RepairedSequenceNames = repairedSequenceNames,
+			RepairedSourceDimensions = repairedSourceDimensions,
+			RepairedKeyOrder = repairedKeyOrder,
 			SourceSchemaVersion = sourceVersion,
 			PreservedWeaponTracks = preservedTracks,
 			RemovedTracks = removedTracks,
 			RemovedConstraints = removedConstraints
 		};
+	}
+
+	private static bool KeysAreSorted( IEnumerable<float> times )
+	{
+		var hasPrevious = false;
+		var previous = 0.0f;
+		foreach ( var time in times )
+		{
+			if ( hasPrevious && previous > time )
+				return false;
+			previous = time;
+			hasPrevious = true;
+		}
+		return true;
 	}
 
 	internal static bool RepairLegacyIdleBindPose(

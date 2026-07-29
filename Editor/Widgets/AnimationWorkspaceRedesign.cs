@@ -75,7 +75,7 @@ public sealed class RigBrowserPanel : Widget
 
 	private void RefreshDocument()
 	{
-		var skeleton = HostSkeletonBuilder.Build( _controller.Document );
+		var skeleton = HostSkeletonBuilder.BuildCached( _controller.Document );
 		if ( _structureSignature != StructureSignature( skeleton ) )
 		{
 			Rebuild();
@@ -103,7 +103,7 @@ public sealed class RigBrowserPanel : Widget
 				_canvas.Layout.Clear( true );
 				_itemButtons.Clear();
 				_weaponItems.Clear();
-				var skeleton = HostSkeletonBuilder.Build( _controller.Document );
+				var skeleton = HostSkeletonBuilder.BuildCached( _controller.Document );
 				_structureSignature = StructureSignature( skeleton );
 				var groups = GroupBones( skeleton );
 				AddControlGroup();
@@ -227,7 +227,7 @@ public sealed class RigBrowserPanel : Widget
 		var selected = _controller.Document.Workspace.SelectedBone;
 		if ( string.IsNullOrWhiteSpace( selected ) )
 			return "";
-		return GroupName( HostSkeletonBuilder.Build( _controller.Document ).ByName.GetValueOrDefault( selected ) );
+		return GroupName( HostSkeletonBuilder.BuildCached( _controller.Document ).ByName.GetValueOrDefault( selected ) );
 	}
 
 	private Dictionary<string, List<HostBone>> GroupBones( HostSkeleton skeleton )
@@ -360,7 +360,7 @@ public sealed class RigBrowserPanel : Widget
 				button.Text = item.Value;
 		}
 
-		foreach ( var bone in HostSkeletonBuilder.Build( _controller.Document )
+		foreach ( var bone in HostSkeletonBuilder.BuildCached( _controller.Document )
 			.Bones.Where( x => x.IsWeaponBone ) )
 		{
 			if ( !_itemButtons.TryGetValue( bone.Name, out var button ) )
@@ -620,7 +620,7 @@ public sealed partial class SelectedControlInspectorPanel : Widget
 					() =>
 					{
 						var current = SelectionTransformContext.Resolve( _controller );
-						var skeleton = HostSkeletonBuilder.Build( _controller.Document );
+						var skeleton = HostSkeletonBuilder.BuildCached( _controller.Document );
 						if ( current is null
 							|| !skeleton.ByName.TryGetValue( current.Target, out var bone ) )
 							return;
@@ -913,7 +913,7 @@ internal sealed class SelectionTransformContext
 	{
 		var document = controller.Document;
 		var clip = document.GetSelectedClip();
-		var skeleton = HostSkeletonBuilder.Build( document );
+		var skeleton = HostSkeletonBuilder.BuildCached( document );
 		var pose = AnimationPoseEvaluator.Evaluate(
 			document,
 			skeleton,

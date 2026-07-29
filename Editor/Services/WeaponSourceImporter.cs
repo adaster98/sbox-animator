@@ -17,6 +17,7 @@ public sealed class SourceImportResult
 	public string Message { get; init; } = "";
 	public string ModelPath { get; init; } = "";
 	public Model? Model { get; init; }
+	public Vector3 ModelDimensions { get; init; }
 	public List<RigAuditIssue> Issues { get; init; } = [];
 	public List<SourceMaterialBinding> Materials { get; init; } = [];
 }
@@ -146,6 +147,7 @@ public sealed class WeaponSourceImporter
 			document.Source.CompiledModelPath = modelAsset.Path;
 			document.Source.SourceHash = sourceHash;
 			document.Source.SourceRootBoneName = sourceRootBoneName;
+			document.Source.OriginalModelDimensions = model.Bounds.Size;
 			document.Source.NeedsModelDocWrapper = needsWrapper;
 			document.Source.Compiled = model.BoneCount > 0 && !model.IsError;
 			document.Source.PreviewHostCompiled = false;
@@ -168,6 +170,7 @@ public sealed class WeaponSourceImporter
 					: "The model has no usable skeleton.",
 				ModelPath = modelAsset.Path,
 				Model = model,
+				ModelDimensions = model.Bounds.Size,
 				Issues = issues,
 				Materials = materials
 			};
@@ -340,6 +343,7 @@ public sealed class WeaponSourceImporter
 				Message = ImportMessage( model, selectedPath, materials ),
 				ModelPath = candidateAsset.Path,
 				Model = model,
+				ModelDimensions = model.Bounds.Size,
 				Issues = issues,
 				Materials = materials
 			};
@@ -360,6 +364,9 @@ public sealed class WeaponSourceImporter
 
 		document.Source.Materials = result.Materials;
 		document.Source.CompiledModelPath = result.ModelPath;
+		if ( WeaponAnimationMath.IsFinite( result.ModelDimensions )
+			&& result.ModelDimensions.Length > 0 )
+			document.Source.OriginalModelDimensions = result.ModelDimensions;
 		document.Source.Compiled = result.Model is { IsError: false } && result.Model.BoneCount > 0;
 		document.Source.LastImportedUtc = DateTime.UtcNow;
 		document.Rig.AuditIssues.RemoveAll( issue => issue.Code.StartsWith(
@@ -432,6 +439,8 @@ public sealed class WeaponSourceImporter
 		document.Source.CompiledModelPath = asset.Path;
 		document.Source.Compiled = true;
 		document.Source.PreviewHostCompiled = false;
+		if ( model.Bounds.Size.Length > 0 )
+			document.Source.OriginalModelDimensions = model.Bounds.Size;
 		message =
 			$"Recovered the source weapon preview from '{previous}' to '{asset.Path}' "
 			+ $"({model.BoneCount} bones). Save the project to retain the repaired path.";
@@ -632,7 +641,11 @@ public sealed class WeaponSourceImporter
 			? " No source material slots were reported."
 			: $" Matched textures for {textured} of {materials.Count} material slot(s).";
 		return $"Imported {model.BoneCount} bones from {Path.GetFileName( selectedPath )}."
-			+ materialSummary;
+			+ materialSummary
+			+ (WeaponSourceFormatSupport.CanGenerate( selectedPath )
+				? ""
+				: " SMD generation is unavailable in S&box ModelDoc; re-export as FBX or DMX "
+					+ "before generating the final viewmodel.");
 	}
 
 	private static List<WeaponBoneDefinition> AuditBones(

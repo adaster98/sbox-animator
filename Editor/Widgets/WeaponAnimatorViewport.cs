@@ -210,6 +210,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private int _armPoseDiagnosticFrames;
 	private Vector2 _lastMouse;
 	private readonly Dictionary<string, Transform> _testPose = new( StringComparer.OrdinalIgnoreCase );
+	private string _calibrationGizmoTarget = "";
 	private string _animationGizmoTarget = "";
 	private RigControlKind _animationGizmoKind;
 	private Transform _animationGizmoStartLocal;
@@ -223,6 +224,12 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	public bool IsPlaying => _controller.IsPlaying;
 	public WeaponAnimatorTransformMode TransformMode { get; private set; }
 	public Vector3 ModelDimensions => _sourceRenderer?.Model?.Bounds.Size ?? Vector3.Zero;
+	public bool ConsumesFreeLookMovementShortcut =>
+		_controller.Document.Workspace.FreeLookCamera
+		&& !_controller.Document.Workspace.FirstPersonPreview
+		&& IsActiveWindow
+		&& IsUnderMouse
+		&& PickMode == ViewportPickMode.None;
 	public event Action<string>? StatusChanged;
 	public event Action<Vector3>? ModelDimensionsChanged;
 	public event Action? LegacyIdleRepaired;
@@ -343,6 +350,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 
 	public override void OnDestroyed()
 	{
+		EndCalibrationGizmoDrag();
 		EndAnimationGizmoDrag();
 		_controller.DocumentChanged -= OnDocumentChanged;
 		_controller.PoseChanged -= Update;
@@ -381,6 +389,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			return;
 		}
 
+		EndCalibrationGizmoDrag();
 		EndAnimationGizmoDrag();
 		TransformMode = mode;
 		RefreshTransformOverlay();
@@ -667,6 +676,8 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			if ( document.ActiveStage == WeaponAnimatorStage.Animate
 				&& !string.IsNullOrWhiteSpace( document.Source.PreviewHostPath ) )
 			{
+				// Failed host loads wait for a path change or an explicit rebuild.
+				_loadedHost = document.Source.PreviewHostPath;
 				var hostModel = Model.Load( document.Source.PreviewHostPath );
 				if ( hostModel is not null && !hostModel.IsError )
 				{
@@ -676,8 +687,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					_hostRenderer.Enabled = true;
 					_hostRenderer.UseAnimGraph = false;
 					SuppressHostRendering();
-					_hostSkeleton = HostSkeletonBuilder.Build( document );
-					_loadedHost = document.Source.PreviewHostPath;
+					_hostSkeleton = HostSkeletonBuilder.BuildCached( document );
 
 					if ( _sourceRenderer.IsValid() )
 					{
@@ -690,6 +700,13 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 						_armsRenderer.BoneMergeTarget = null;
 						_armsRenderer.Tint = Color.White;
 					}
+				}
+				else
+				{
+					Log.Warning(
+						$"[Weapon Animator] animation host preview is unavailable: "
+						+ $"'{document.Source.PreviewHostPath}'. "
+						+ "The viewport will wait for a path change or a manual rebuild." );
 				}
 			}
 		}
@@ -704,6 +721,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		Scene.EditorTick( RealTime.Now, RealTime.Delta );
 		GizmoInstance.Input.IsHovered = IsActiveWindow && IsUnderMouse;
 		UpdateGizmoInputs( GizmoInstance.Input.IsHovered );
+		FinishCalibrationGizmoDragIfReleased();
 		FinishAnimationGizmoDragIfReleased();
 
 		if ( RepairLegacyIdleIfNeeded() )
@@ -1624,7 +1642,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		{
 			if ( Gizmo.Control.Rotate( "anchor_rotate", Rotation.Identity, out var delta ) )
 			{
-				_controller.Mutate( $"Rotate {anchor.Name} anchor", document =>
+				UpdateCalibrationGizmo(
+					$"anchor:{anchor.Kind}:rotate",
+					$"Rotate {anchor.Name} anchor",
+					document =>
 				{
 					var selected = document.Calibration.GetAnchor( anchor.Kind );
 					if ( selected is null )
@@ -1638,7 +1659,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			&& Gizmo.Control.Position( "anchor_move", world.Position, out var position ) )
 		{
 			position = SnapAbsolutePosition( world.Position, position, world.Rotation );
-			_controller.Mutate( $"Move {anchor.Name} anchor", document =>
+			UpdateCalibrationGizmo(
+				$"anchor:{anchor.Kind}:move",
+				$"Move {anchor.Name} anchor",
+				document =>
 			{
 				var selected = document.Calibration.GetAnchor( anchor.Kind );
 				if ( selected is null )
@@ -1661,7 +1685,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		{
 			if ( Gizmo.Control.Rotate( "rig_rotate", Rotation.Identity, out var delta ) )
 			{
-				_controller.Mutate( "Refine whole-rig rotation", d =>
+				UpdateCalibrationGizmo(
+					"whole_rig:rotate",
+					"Refine whole-rig rotation",
+					d =>
 				{
 					var target = d.Workspace.FirstPersonPreview
 						? d.Calibration.FramingTransform
@@ -1670,7 +1697,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					if ( d.Workspace.FirstPersonPreview )
 						d.Calibration.FramingTransform = target;
 					else
+					{
 						d.Calibration.PhysicalTransform = target;
+						d.Calibration.Confirmed = false;
+					}
 				} );
 			}
 		}
@@ -1678,13 +1708,21 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			&& Gizmo.Control.Position( "rig_move", transform.Position, out var position ) )
 		{
 			position = SnapAbsolutePosition( transform.Position, position, transform.Rotation );
-			_controller.Mutate( "Refine whole-rig position", d =>
-			{
-				if ( d.Workspace.FirstPersonPreview )
-					d.Calibration.FramingTransform = d.Calibration.FramingTransform.WithPosition( position );
-				else
-					d.Calibration.PhysicalTransform = d.Calibration.PhysicalTransform.WithPosition( position );
-			} );
+			UpdateCalibrationGizmo(
+					"whole_rig:move",
+					"Refine whole-rig position",
+					d =>
+				{
+					if ( d.Workspace.FirstPersonPreview )
+						d.Calibration.FramingTransform =
+							d.Calibration.FramingTransform.WithPosition( position );
+					else
+					{
+						d.Calibration.PhysicalTransform =
+							d.Calibration.PhysicalTransform.WithPosition( position );
+						d.Calibration.Confirmed = false;
+					}
+				} );
 		}
 		else if ( TransformMode == WeaponAnimatorTransformMode.Scale )
 		{
@@ -1692,7 +1730,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			if ( Gizmo.Control.Scale( "rig_scale", uniformScale, out var scale ) )
 			{
 				scale = MathF.Max( scale, 0.0001f );
-				_controller.Mutate( "Refine whole-rig scale", d =>
+				UpdateCalibrationGizmo(
+					"whole_rig:scale",
+					"Refine whole-rig scale",
+					d =>
 				{
 					var target = d.Workspace.FirstPersonPreview
 						? d.Calibration.FramingTransform
@@ -1701,10 +1742,49 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					if ( d.Workspace.FirstPersonPreview )
 						d.Calibration.FramingTransform = target;
 					else
+					{
 						d.Calibration.PhysicalTransform = target;
+						d.Calibration.UniformScale = scale;
+						d.Calibration.Confirmed = false;
+					}
 				} );
 			}
 		}
+	}
+
+	private void UpdateCalibrationGizmo(
+		string target,
+		string description,
+		Action<WeaponAnimationDocument> mutation )
+	{
+		if ( !_calibrationGizmoTarget.Equals(
+			target,
+			StringComparison.OrdinalIgnoreCase ))
+		{
+			EndCalibrationGizmoDrag();
+			_calibrationGizmoTarget = target;
+			_controller.BeginContinuousEdit( description );
+		}
+
+		_controller.UpdateContinuousEdit( mutation );
+	}
+
+	private void FinishCalibrationGizmoDragIfReleased()
+	{
+		if ( string.IsNullOrWhiteSpace( _calibrationGizmoTarget )
+			|| Gizmo.Pressed.Any )
+			return;
+
+		EndCalibrationGizmoDrag();
+	}
+
+	private void EndCalibrationGizmoDrag()
+	{
+		if ( string.IsNullOrWhiteSpace( _calibrationGizmoTarget ) )
+			return;
+
+		_calibrationGizmoTarget = "";
+		_controller.EndContinuousEdit();
 	}
 
 	private void DrawAnimationControl()

@@ -30,6 +30,7 @@ public sealed class WeaponAnimatorController
 	public event Action? DocumentChanged;
 	public event Action? PoseChanged;
 	public event Action? SelectionChanged;
+	public event Action? KeySelectionChanged;
 	public event Action? DirtyChanged;
 	public event Action? TimelineChanged;
 	public event Action? TimelineViewChanged;
@@ -52,6 +53,7 @@ public sealed class WeaponAnimatorController
 		LastAction = "";
 		DocumentChanged?.Invoke();
 		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 		DirtyChanged?.Invoke();
 		PlaybackChanged?.Invoke();
 	}
@@ -146,6 +148,7 @@ public sealed class WeaponAnimatorController
 		SetDirty( dirty );
 		DocumentChanged?.Invoke();
 		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void Undo()
@@ -163,6 +166,7 @@ public sealed class WeaponAnimatorController
 		SetDirty( true );
 		DocumentChanged?.Invoke();
 		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void Redo()
@@ -180,6 +184,7 @@ public sealed class WeaponAnimatorController
 		SetDirty( true );
 		DocumentChanged?.Invoke();
 		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void MarkSaved()
@@ -217,6 +222,7 @@ public sealed class WeaponAnimatorController
 		_selectedKeys.Clear();
 		SetPlaying( false );
 		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 		DocumentChanged?.Invoke();
 	}
 
@@ -537,7 +543,7 @@ public sealed class WeaponAnimatorController
 
 		foreach ( var key in keyIds )
 			_selectedKeys.Add( key );
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void SetSelectedKeys( IEnumerable<Guid> keyIds )
@@ -548,7 +554,7 @@ public sealed class WeaponAnimatorController
 		_selectedKeys.Clear();
 		foreach ( var keyId in next )
 			_selectedKeys.Add( keyId );
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void ToggleSelectedKeys( IEnumerable<Guid> keyIds )
@@ -558,7 +564,7 @@ public sealed class WeaponAnimatorController
 			if ( !_selectedKeys.Remove( keyId ) )
 				_selectedKeys.Add( keyId );
 		}
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void BeginSelectedKeyMove()
@@ -763,7 +769,7 @@ public sealed class WeaponAnimatorController
 			}
 		} );
 
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void DeleteSelectedKeys()
@@ -786,7 +792,7 @@ public sealed class WeaponAnimatorController
 			_selectedKeys.Clear();
 		} );
 
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void ReverseKeys()
@@ -872,7 +878,65 @@ public sealed class WeaponAnimatorController
 				: ClipReadiness.Draft;
 		} );
 
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
+	}
+
+	public void KeySelectedTransform()
+	{
+		var selectedControl = Document.Workspace.SelectedControl;
+		if ( !string.IsNullOrWhiteSpace( selectedControl ) )
+		{
+			var target = selectedControl switch
+			{
+				"@primary_hand" => Document.Binding.PrimaryHand,
+				"@support_hand" => Document.Binding.SupportHand,
+				"@primary_elbow" => Document.Binding.PrimaryElbowPole,
+				"@support_elbow" => Document.Binding.SupportElbowPole,
+				_ => null
+			};
+			if ( target is null )
+				return;
+
+			var clip = Document.GetSelectedClip();
+			var fallback = clip?.Tracks.FirstOrDefault( x =>
+					x.Target.Equals( selectedControl, StringComparison.OrdinalIgnoreCase ) ) is { } track
+				? WeaponAnimationMath.SampleTrack(
+					track,
+					Document.Workspace.TimelineTime,
+					target.Transform )
+				: target.Transform;
+			CommitWorkingPose( selectedControl, RigControlKind.Arm, fallback );
+			return;
+		}
+
+		var selectedBone = Document.Workspace.SelectedBone;
+		if ( string.IsNullOrWhiteSpace( selectedBone ) )
+			return;
+		var weaponSelection = selectedBone.Equals(
+				"weapon_root",
+				StringComparison.OrdinalIgnoreCase )
+			|| Document.Rig.RetainedBones().Any( definition =>
+				definition.Name.Equals( selectedBone, StringComparison.OrdinalIgnoreCase ) );
+		var skeleton = HostSkeletonBuilder.BuildCached(
+			Document,
+			includeArmProfile: !weaponSelection );
+		if ( !skeleton.ByName.TryGetValue( selectedBone, out var bone ) )
+			return;
+
+		var selectedClip = Document.GetSelectedClip();
+		var bind = skeleton.GetBindLocal( bone );
+		var selectedTrack = selectedClip?.Tracks.FirstOrDefault( x =>
+			x.Target.Equals( selectedBone, StringComparison.OrdinalIgnoreCase ) );
+		var value = selectedTrack is null
+			? bind
+			: WeaponAnimationMath.SampleTrack(
+				selectedTrack,
+				Document.Workspace.TimelineTime,
+				bind );
+		CommitWorkingPose(
+			selectedBone,
+			bone.IsWeaponBone ? RigControlKind.Weapon : RigControlKind.Arm,
+			value );
 	}
 
 	public void ApplyTransformEdit( string target, RigControlKind kind, Transform value )
@@ -889,7 +953,6 @@ public sealed class WeaponAnimatorController
 		Mutate(
 			$"Pose {target}",
 			document => document.Workspace.SetWorkingPose( clip.Id, target, kind, value ) );
-		SelectionChanged?.Invoke();
 	}
 
 	public void UpdateTransformEditContinuous(
@@ -944,7 +1007,6 @@ public sealed class WeaponAnimatorController
 		Mutate(
 			$"Revert {target}",
 			document => document.Workspace.RemoveWorkingPose( clip.Id, target ) );
-		SelectionChanged?.Invoke();
 	}
 
 	public bool HasKeyAtPlayhead( string target )
@@ -995,7 +1057,7 @@ public sealed class WeaponAnimatorController
 				clip.VisibilityTracks.RemoveAll( x => x.PartId == partId );
 			_selectedKeys.Clear();
 		} );
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void UpdateVisibilityPart(
@@ -1053,7 +1115,7 @@ public sealed class WeaponAnimatorController
 				? ClipReadiness.Ready
 				: ClipReadiness.Draft;
 		} );
-		SelectionChanged?.Invoke();
+		KeySelectionChanged?.Invoke();
 	}
 
 	public void RemoveVisibilityKeyAtPlayhead( Guid partId )

@@ -5,6 +5,8 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Editor;
 using Sandbox;
 
@@ -17,6 +19,8 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private readonly WeaponSourceImporter _importer = new();
 	private readonly AssetGenerationService _generator = new();
 	private bool _generating;
+	private CancellationTokenSource? _generationCancellation;
+	private bool _closeAfterGenerationStops;
 	private bool _refreshingMaterials;
 	private Asset? _asset;
 	private WeaponAnimationAsset? _resource;
@@ -29,12 +33,16 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private Splitter? _animationRightSplitter;
 	private Splitter? _animationOuterSplitter;
 	private Button? _validationButton;
+	private Button? _generateButton;
 	private Button? _playButton;
 	private bool _allowClose;
 	private bool _rebaseOnConfirm;
 	private bool _rebuilding;
 	private WeaponAnimationMigrationResult? _migration;
 	private bool _migrationBackupRequired;
+	private bool _recoveryWritePending;
+	private bool _closing;
+	private int _recoveryRequestVersion;
 
 	public bool CanOpenMultipleAssets => false;
 	public void SelectMember( string memberName ) { }
@@ -51,7 +59,6 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 		_controller.DocumentChanged += OnDocumentChanged;
 		_controller.DirtyChanged += OnDirtyChanged;
-		_controller.SelectionChanged += RefreshToolbarState;
 		_controller.PlaybackChanged += RefreshToolbarState;
 
 		BuildMenuBar();
@@ -92,6 +99,15 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	protected override bool OnClose()
 	{
 		SaveWorkspaceState();
+		if ( _generating )
+		{
+			_closeAfterGenerationStops = true;
+			_generationCancellation?.Cancel();
+			_statusPanel?.SetMessage(
+				"Cancelling asset generation before closing…",
+				ValidationSeverity.Warning );
+			return false;
+		}
 		if ( _allowClose || !_controller.IsDirty )
 		{
 			DestroyWorkspace();
@@ -139,30 +155,15 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private void ShortcutCut() => _controller.CutSelectedKeys();
 
 	[Shortcut( "weaponanim.key", "K", ShortcutType.Window )]
-	private void ShortcutKey()
-	{
-		var document = _controller.Document;
-		if ( !string.IsNullOrWhiteSpace( document.Workspace.SelectedControl ) )
-		{
-			var target = document.Workspace.SelectedControl switch
-			{
-				"@primary_hand" => document.Binding.PrimaryHand,
-				"@support_hand" => document.Binding.SupportHand,
-				"@primary_elbow" => document.Binding.PrimaryElbowPole,
-				"@support_elbow" => document.Binding.SupportElbowPole,
-				_ => null
-			};
-			if ( target is not null )
-				_controller.UpsertSelectedTransformKey(
-					document.Workspace.SelectedControl,
-					RigControlKind.Arm,
-					target.Transform );
-		}
-	}
+	private void ShortcutKey() => _controller.KeySelectedTransform();
 
 	[Shortcut( "weaponanim.move", "W", ShortcutType.Window )]
-	private void ShortcutMove() =>
+	private void ShortcutMove()
+	{
+		if ( _viewport?.ConsumesFreeLookMovementShortcut == true )
+			return;
 		_viewport?.SetTransformMode( WeaponAnimatorTransformMode.Move );
+	}
 
 	[Shortcut( "weaponanim.rotate", "E", ShortcutType.Window )]
 	private void ShortcutRotate() =>
@@ -175,6 +176,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	[EditorEvent.Hotload]
 	public void OnHotload()
 	{
+		HostSkeletonBuilder.ClearCache();
 		SaveWorkspaceState();
 		MenuBar.Clear();
 		BuildMenuBar();
@@ -278,7 +280,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			return;
 		_toolbar.Clear();
 		_toolbar.AddLeft( "Save", "save", () => Save() );
-		_toolbar.AddLeft( "Generate", "build", GenerateAssets, true );
+		_generateButton = _toolbar.AddLeft( "Generate", "build", GenerateAssets, true );
 		if ( _controller.Document.ActiveStage == WeaponAnimatorStage.Animate )
 		{
 			_playButton = _toolbar.AddLeft( "Play", "play_arrow", TogglePlayback );
@@ -302,6 +304,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		animate.IsChecked = _controller.Document.ActiveStage == WeaponAnimatorStage.Animate;
 
 		_validationButton = _toolbar.AddRight( "Validate", "rule", Validate );
+		RefreshGenerationButton();
 		_toolbar.BalanceCenter();
 	}
 
@@ -760,7 +763,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			var idle = document.EnsureClip( WeaponClipRole.Idle );
 			if ( idle.Tracks.Count == 0 || idle.IsBindPoseSeed )
 			{
-				var skeleton = HostSkeletonBuilder.Build( document );
+				var skeleton = HostSkeletonBuilder.BuildCached( document );
 				IdleBindPoseService.SeedFromCurrentBind( document, skeleton );
 			}
 			idle.Readiness = ClipReadiness.Ready;
@@ -914,13 +917,16 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		// starting a competing run over the same output files.
 		if ( _generating )
 		{
+			_generationCancellation?.Cancel();
 			_statusPanel?.SetMessage(
-				"Asset generation is already in progress.",
+				"Cancelling asset generation safely…",
 				ValidationSeverity.Warning );
 			return;
 		}
 
 		_generating = true;
+		_generationCancellation = new CancellationTokenSource();
+		RefreshGenerationButton();
 		Log.Info( "[Weapon Animator] asset generation requested." );
 		try
 		{
@@ -938,13 +944,30 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			}
 
 			_statusPanel?.SetMessage( "Generating and compiling assets…", ValidationSeverity.Info );
-			var result = await _generator.GenerateAsync( _controller.Document );
+			var result = await _generator.GenerateAsync(
+				_controller.Document,
+				progress =>
+				{
+					var count = progress.Total > 0
+						? $" {progress.Completed}/{progress.Total}"
+						: "";
+					_statusPanel?.SetMessage(
+						$"{progress.Stage}{count} — {progress.Detail}",
+						ValidationSeverity.Info );
+				},
+				_generationCancellation.Token );
 			if ( result.Success )
 			{
 				_statusPanel?.SetMessage(
 					$"Generated and reloaded {result.GeneratedFiles.Count} files in {result.OutputFolder}.",
 					ValidationSeverity.Info );
 				Save();
+			}
+			else if ( result.Cancelled )
+			{
+				_statusPanel?.SetMessage(
+					"Asset generation cancelled; previous owned outputs were restored.",
+					ValidationSeverity.Warning );
 			}
 			else
 			{
@@ -958,6 +981,12 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 					ValidationSeverity.Error );
 			}
 		}
+		catch ( OperationCanceledException )
+		{
+			_statusPanel?.SetMessage(
+				"Asset generation cancelled before outputs were changed.",
+				ValidationSeverity.Warning );
+		}
 		catch ( Exception ex )
 		{
 			Log.Error( $"[Weapon Animator] generation threw: {ex}" );
@@ -966,8 +995,31 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 		finally
 		{
 			_generating = false;
+			_generationCancellation?.Dispose();
+			_generationCancellation = null;
+			RefreshGenerationButton();
 			RefreshToolbarState();
+			if ( _closeAfterGenerationStops )
+			{
+				_closeAfterGenerationStops = false;
+				Close();
+			}
 		}
+	}
+
+	private void RefreshGenerationButton()
+	{
+		if ( _generateButton is null )
+			return;
+
+		_generateButton.Text = _generating ? "Cancel" : "Generate";
+		_generateButton.Icon = _generating ? "stop" : "build";
+		_generateButton.Tint = _generating
+			? WeaponAnimatorTheme.Coral * 0.58f
+			: WeaponAnimatorTheme.Cyan * 0.72f;
+		if ( _generateButton is WeaponAnimatorButton button )
+			button.FitToContent( true );
+		_toolbar?.BalanceCenter();
 	}
 
 	private void Validate()
@@ -1048,7 +1100,7 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private void OnDocumentChanged()
 	{
 		if ( _controller.IsDirty )
-			RecoveryService.Write( _controller.Document );
+			QueueRecoveryWrite();
 		RefreshTitle();
 		RefreshToolbarState();
 	}
@@ -1056,8 +1108,42 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 	private void OnDirtyChanged()
 	{
 		if ( _controller.IsDirty )
-			RecoveryService.Write( _controller.Document );
+			QueueRecoveryWrite();
 		RefreshTitle();
+	}
+
+	private void QueueRecoveryWrite()
+	{
+		if ( _closing || !_controller.IsDirty )
+			return;
+
+		_recoveryRequestVersion++;
+		if ( _recoveryWritePending )
+			return;
+
+		_recoveryWritePending = true;
+		_ = WriteRecoveryAfterQuietPeriodAsync();
+	}
+
+	private async Task WriteRecoveryAfterQuietPeriodAsync()
+	{
+		try
+		{
+			while ( !_closing && _controller.IsDirty )
+			{
+				var requestedVersion = _recoveryRequestVersion;
+				await Task.Delay( 750 );
+				if ( requestedVersion != _recoveryRequestVersion )
+					continue;
+
+				RecoveryService.Write( _controller.Document );
+				return;
+			}
+		}
+		finally
+		{
+			_recoveryWritePending = false;
+		}
 	}
 
 	private void RefreshTitle()
@@ -1216,6 +1302,9 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 
 	private void CloseAfterPrompt()
 	{
+		_closing = true;
+		_recoveryRequestVersion++;
+		RecoveryService.Clear( _controller.Document.DocumentId );
 		_allowClose = true;
 		Close();
 	}
