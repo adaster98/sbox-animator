@@ -720,6 +720,7 @@ public sealed class WorkspaceState
 	public bool ShowGuides { get; set; }
 	public bool ShowSkeleton { get; set; } = true;
 	public bool XRaySkeleton { get; set; } = true;
+	public bool ShowIkBones { get; set; }
 	public bool ShowOnionSkins { get; set; }
 	public float GridOpacity { get; set; } = 0.10f;
 	public float GridLineThickness { get; set; } = 0.65f;

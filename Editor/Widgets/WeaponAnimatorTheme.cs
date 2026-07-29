@@ -21,6 +21,42 @@ public static class WeaponAnimatorTheme
 	public static readonly Color Coral = new( 0.98f, 0.38f, 0.34f );
 	public const float ScrollbarGutter = 14;
 
+	/// <summary>
+	/// Arm bone depth ramp, root to fingertips. Saturation stays high across the whole arc - an
+	/// earlier version faded toward white at the fingertips, and desaturated colours collapse
+	/// together against the dark viewport, which is exactly where the bones are densest. Hue
+	/// carries the signal instead, sweeping violet through cyan to chartreuse, staying clear of
+	/// Amber (weapon bones) and Coral (IK bones).
+	/// </summary>
+	private static readonly Color[] BoneDepthRamp =
+	[
+		new( 0.58f, 0.24f, 1.00f ),
+		new( 0.30f, 0.45f, 1.00f ),
+		new( 0.08f, 0.68f, 1.00f ),
+		new( 0.10f, 0.92f, 0.94f ),
+		new( 0.16f, 1.00f, 0.58f ),
+		new( 0.52f, 1.00f, 0.30f ),
+		new( 0.82f, 1.00f, 0.24f )
+	];
+
+	/// <summary>
+	/// Samples the bone depth ramp. <paramref name="fraction"/> is 0 at the skeleton root and 1 at
+	/// the deepest bone.
+	/// </summary>
+	public static Color BoneDepthColor( float fraction )
+	{
+		if ( !float.IsFinite( fraction ) )
+			return BoneDepthRamp[0];
+
+		var clamped = Math.Clamp( fraction, 0, 1 );
+		var scaled = clamped * (BoneDepthRamp.Length - 1);
+		var index = Math.Clamp( (int)scaled, 0, BoneDepthRamp.Length - 2 );
+		return Color.Lerp(
+			BoneDepthRamp[index],
+			BoneDepthRamp[index + 1],
+			scaled - index );
+	}
+
 	public const string PanelStyle =
 		"background-color: rgb(21,23,26);" +
 		"border: 1px solid rgba(255,255,255,0.075);" +

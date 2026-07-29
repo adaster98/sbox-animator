@@ -250,6 +250,143 @@ public static class WeaponAnimatorSelfTests
 			report,
 			!ArmPreviewVisualStyle.Resolve( WeaponAnimatorStage.Animate, false ).UseFlatMaterial,
 			"Lit animation preview must preserve the production arms materials." );
+		// The four *_ikrule names are the real helper bones on the Facepunch arms; ik_hand_* are
+		// added by HostSkeletonBuilder. None are read by anything, and all trail long lines.
+		foreach ( var ikName in new[]
+		{
+			"hand_R_to_L_ikrule",
+			"hand_L_to_R_ikrule",
+			"hand_R_to_weapon_ikrule",
+			"hand_L_to_weapon_ikrule",
+			"ik_hand_R",
+			"ik_hand_L",
+			"weapon_IK_hand_R",
+			"weapon_IK_hand_L"
+		} )
+		{
+			Check(
+				report,
+				SkeletonBoneStyle.Classify( new HostBone { Name = ikName } ) == SkeletonBoneKind.Ik,
+				$"{ikName} must be treated as an IK helper bone." );
+		}
+		// Weapon rigs ship their own IK targets, so the IK test deliberately wins over IsWeaponBone.
+		Check(
+			report,
+			SkeletonBoneStyle.Classify(
+				new HostBone { Name = "weapon_IK_hand_R", IsWeaponBone = true } )
+					== SkeletonBoneKind.Ik,
+			"An IK target from the weapon rig must be treated as an IK helper, not a weapon bone." );
+		// The trap in letting IK win: "ik" must match as a token, never as a substring.
+		foreach ( var keptName in new[]
+		{
+			"weapon_root",
+			"spike_guard",
+			"strike_plate",
+			"trigger",
+			"slide_kick",
+			"ikon"
+		} )
+		{
+			Check(
+				report,
+				SkeletonBoneStyle.Classify(
+					new HostBone { Name = keptName, IsWeaponBone = true } )
+						== SkeletonBoneKind.Weapon,
+				$"{keptName} must stay a visible weapon bone - 'ik' matches tokens, not substrings." );
+		}
+		Check(
+			report,
+			SkeletonBoneStyle.Classify( new HostBone { Name = "arm_lower_R_twist1" } )
+					== SkeletonBoneKind.Twist
+				&& SkeletonBoneStyle.Classify( new HostBone { Name = "arm_lower_R_twistctrl0" } )
+					== SkeletonBoneKind.Twist
+				&& SkeletonBoneStyle.Classify( new HostBone { Name = "hand_R" } )
+					== SkeletonBoneKind.Arm,
+			"Twist helpers must be distinguished from the arm chain proper." );
+		var hiddenIk = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Ik, 2, 8, false );
+		var shownIk = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Ik, 2, 8, true );
+		Check(
+			report,
+			!hiddenIk.Visible && shownIk.Visible && shownIk.Color == WeaponAnimatorTheme.Coral,
+			"IK bones must be hidden by default and drawn red when enabled." );
+		Check(
+			report,
+			SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 2, 8, false ).Visible
+				&& SkeletonBoneStyle.Resolve( SkeletonBoneKind.Weapon, 0, 8, false ).Visible,
+			"Hiding IK bones must not hide anything else." );
+		var twistStyle = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Twist, 4, 8, false );
+		var armStyle = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 4, 8, false );
+		Check(
+			report,
+			twistStyle.Visible
+				&& twistStyle.AlphaScale < armStyle.AlphaScale
+				&& twistStyle.Color == armStyle.Color,
+			"Twist bones must recede without changing hue or becoming unclickable." );
+		Check(
+			report,
+			twistStyle.Hollow
+				&& shownIk.Hollow
+				&& !armStyle.Hollow
+				&& !SkeletonBoneStyle.Resolve( SkeletonBoneKind.Weapon, 0, 8, false ).Hollow,
+			"Derived bones must be hollow and directly posed bones solid, so shape carries the distinction." );
+		Check(
+			report,
+			SkeletonBoneStyle.Resolve( SkeletonBoneKind.Weapon, 6, 8, false ).Color
+				== WeaponAnimatorTheme.Amber,
+			"Weapon bones must stay amber regardless of depth." );
+		var rootColor = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 0, 8, false ).Color;
+		var midColor = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 4, 8, false ).Color;
+		var tipColor = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 8, 8, false ).Color;
+		Check(
+			report,
+			rootColor != midColor && midColor != tipColor && rootColor != tipColor,
+			"The arm gradient must separate root, mid-chain and fingertip bones." );
+		Check(
+			report,
+			tipColor.r > rootColor.r && tipColor.g > rootColor.g,
+			"The arm gradient must brighten toward the fingertips." );
+
+		// The first ramp faded to near-white at the fingertips, where bones are densest, and the
+		// distal steps were hard to tell apart. Guard the weakest step, and specifically require the
+		// distal half to separate about as well as the proximal half.
+		static float Separation( int fromDepth, int toDepth )
+		{
+			var a = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, fromDepth, 8, false ).Color;
+			var b = SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, toDepth, 8, false ).Color;
+			return MathF.Sqrt(
+				((a.r - b.r) * (a.r - b.r))
+				+ ((a.g - b.g) * (a.g - b.g))
+				+ ((a.b - b.b) * (a.b - b.b)) );
+		}
+
+		var weakestStep = float.MaxValue;
+		for ( var depth = 0; depth < 8; depth++ )
+			weakestStep = MathF.Min( weakestStep, Separation( depth, depth + 1 ) );
+		Check(
+			report,
+			weakestStep > 0.15f,
+			"Every step along the arm gradient must be clearly distinguishable from the next." );
+		Check(
+			report,
+			Separation( 0, 8 ) > 1.0f,
+			"The gradient must travel a long way between the root and the fingertips." );
+		Check(
+			report,
+			WeaponAnimatorTheme.BoneDepthColor( -5 ) == WeaponAnimatorTheme.BoneDepthColor( 0 )
+				&& WeaponAnimatorTheme.BoneDepthColor( 5 ) == WeaponAnimatorTheme.BoneDepthColor( 1 )
+				&& WeaponAnimatorTheme.BoneDepthColor( float.NaN )
+					== WeaponAnimatorTheme.BoneDepthColor( 0 ),
+			"Out-of-range and non-finite depth fractions must clamp to the ramp ends." );
+		Check(
+			report,
+			SkeletonBoneStyle.Resolve( SkeletonBoneKind.Arm, 3, 0, false ).Color
+				== WeaponAnimatorTheme.BoneDepthColor( 0 ),
+			"A skeleton with no measurable depth must not divide by zero." );
+		Check(
+			report,
+			!document.Workspace.ShowIkBones,
+			"IK bones must be hidden by default." );
+
 		var xrayStyle = SkeletonOverlayStyle.Resolve( true, 1.0f );
 		Check(
 			report,

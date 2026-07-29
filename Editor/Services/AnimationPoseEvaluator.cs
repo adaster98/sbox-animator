@@ -13,6 +13,13 @@ public sealed class EvaluatedPose
 	public Dictionary<string, Transform> Local { get; } = new( StringComparer.OrdinalIgnoreCase );
 	public bool PrimaryReachable { get; set; } = true;
 	public bool SupportReachable { get; set; } = true;
+
+	/// <summary>
+	/// The goals the IK actually solved toward, after clip sampling and constraints. The viewport
+	/// tether draws these; the raw binding transform diverges as soon as a clip animates the hand.
+	/// </summary>
+	public Transform? PrimaryHandGoal { get; set; }
+	public Transform? SupportHandGoal { get; set; }
 }
 
 public static class AnimationPoseEvaluator
@@ -96,6 +103,7 @@ public static class AnimationPoseEvaluator
 				pose.Model,
 				constraintStartModel );
 
+			pose.PrimaryHandGoal = primaryHand;
 			ApplyArmIk(
 				pose,
 				skeleton,
@@ -141,6 +149,7 @@ public static class AnimationPoseEvaluator
 				skeleton,
 				pose.Model,
 				constraintStartModel );
+			pose.SupportHandGoal = supportHand;
 			ApplyArmIk(
 				pose,
 				skeleton,

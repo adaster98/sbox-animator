@@ -232,6 +232,10 @@ public sealed class WeaponAnimatorWindow : DockWindow, IAssetEditor
 			_controller.UpdateWorkspacePreference(
 				"X-ray skeleton",
 				workspace => workspace.XRaySkeleton = !workspace.XRaySkeleton ) );
+		view.AddOption( "Show IK Bones", "polyline", () =>
+			_controller.UpdateWorkspacePreference(
+				"Show IK bones",
+				workspace => workspace.ShowIkBones = !workspace.ShowIkBones ) );
 		view.AddOption( "Toggle Onion Skins", "filter_none", () =>
 			_controller.Mutate( "Onion skins", d => d.Workspace.ShowOnionSkins = !d.Workspace.ShowOnionSkins ) );
 		view.AddOption( "Viewmodel Camera Preview", "videocam", () =>

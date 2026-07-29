@@ -51,6 +51,88 @@ internal readonly record struct ViewportRimLightStyle(
 	}
 }
 
+internal enum SkeletonBoneKind
+{
+	Weapon,
+	Arm,
+	Twist,
+	Ik
+}
+
+/// <summary>
+/// <paramref name="Hollow"/> draws the bone as a wireframe orb instead of a filled dot. Solid means
+/// "you pose this directly"; hollow means the bone is derived - driven by a constraint or kept only
+/// as an export helper. Shape reads at a glance where a size difference alone does not.
+/// </summary>
+internal readonly record struct SkeletonBoneStyle(
+	bool Visible,
+	Color Color,
+	float AlphaScale,
+	float RadiusScale,
+	bool Hollow )
+{
+	/// <summary>
+	/// The Facepunch arms ship four IK helper bones (`hand_*_to_*_ikrule`) kept through compilation
+	/// by BoneMarkup even though they skin nothing, and the host builder adds `ik_hand_R`/`ik_hand_L`
+	/// parented to weapon_root. Nothing reads any of them, and their default binding offset puts
+	/// them well in front of the weapon, so they trail long lines across the viewport.
+	/// </summary>
+	public static SkeletonBoneKind Classify( HostBone bone )
+	{
+		// Checked ahead of the weapon test on purpose: weapon rigs commonly ship their own IK
+		// targets (weapon_IK_hand_R), and those are helpers whichever rig they arrived from.
+		// Hiding is display-only, so a false positive costs visibility, never generated output.
+		if ( HasIkToken( bone.Name ) )
+			return SkeletonBoneKind.Ik;
+		if ( bone.IsWeaponBone )
+			return SkeletonBoneKind.Weapon;
+
+		// Twist bones deform the mesh, so they stay visible and clickable - just quieter.
+		return bone.Name.Contains( "_twist", StringComparison.OrdinalIgnoreCase )
+			? SkeletonBoneKind.Twist
+			: SkeletonBoneKind.Arm;
+	}
+
+	/// <summary>
+	/// Matches `ik` and `ikrule` as whole underscore-delimited tokens rather than as substrings, so
+	/// `weapon_IK_hand_R` and `hand_R_to_weapon_ikrule` are caught while ordinary names that merely
+	/// contain the letters - `spike`, `strike_plate` - are not.
+	/// </summary>
+	private static bool HasIkToken( string name )
+	{
+		foreach ( var token in name.Split( '_', StringSplitOptions.RemoveEmptyEntries ) )
+		{
+			if ( token.Equals( "ik", StringComparison.OrdinalIgnoreCase )
+				|| token.Equals( "ikrule", StringComparison.OrdinalIgnoreCase ) )
+				return true;
+		}
+		return false;
+	}
+
+	public static SkeletonBoneStyle Resolve(
+		SkeletonBoneKind kind,
+		int depth,
+		int maxDepth,
+		bool showIk )
+	{
+		if ( kind == SkeletonBoneKind.Weapon )
+			return new SkeletonBoneStyle( true, WeaponAnimatorTheme.Amber, 1.0f, 1.0f, false );
+		if ( kind == SkeletonBoneKind.Ik )
+			return new SkeletonBoneStyle( showIk, WeaponAnimatorTheme.Coral, 1.0f, 1.0f, true );
+
+		var fraction = maxDepth > 0
+			? Math.Clamp( depth / (float)maxDepth, 0, 1 )
+			: 0;
+		var color = WeaponAnimatorTheme.BoneDepthColor( fraction );
+
+		// Twist bones are driven by TiltTwist constraints, so they read as hollow. They keep close
+		// to full size because a wireframe orb needs the room to be legible at all.
+		return kind == SkeletonBoneKind.Twist
+			? new SkeletonBoneStyle( true, color, 0.7f, 0.9f, true )
+			: new SkeletonBoneStyle( true, color, 1.0f, 1.0f, false );
+	}
+}
+
 internal readonly record struct SkeletonOverlayStyle(
 	bool DrawOccludedPass,
 	float OccludedAlpha )
@@ -213,6 +295,10 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private SkinnedModelRenderer? _armsRenderer;
 	private SkinnedModelRenderer? _hostRenderer;
 	private HostSkeleton? _hostSkeleton;
+	private HostSkeleton? _boneDepthSource;
+	private readonly Dictionary<string, int> _boneDepths =
+		new( StringComparer.OrdinalIgnoreCase );
+	private int _maxBoneDepth;
 	private string _loadedSource = "";
 	private string _loadedHost = "";
 	private string _lastDiagnosticSelection = "";
@@ -1502,6 +1588,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		if ( _hostSkeleton is null )
 			return;
 
+		EnsureBoneDepths();
 		var style = SkeletonOverlayStyle.Resolve(
 			allowXray && _controller.Document.Workspace.XRaySkeleton,
 			alpha );
@@ -1523,11 +1610,41 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 		}
 	}
 
+	/// <summary>
+	/// Bone depth drives the overlay gradient. <c>HostSkeleton.Bones</c> is topologically ordered,
+	/// so one forward pass resolves every depth. <c>BuildCached</c> hands out a shared read-only
+	/// instance, so the cache is keyed on that instance rather than storing depth on the bones.
+	/// </summary>
+	private void EnsureBoneDepths()
+	{
+		if ( ReferenceEquals( _boneDepthSource, _hostSkeleton ) )
+			return;
+
+		_boneDepthSource = _hostSkeleton;
+		_boneDepths.Clear();
+		_maxBoneDepth = 0;
+		if ( _hostSkeleton is null )
+			return;
+
+		foreach ( var bone in _hostSkeleton.Bones )
+		{
+			var depth = !string.IsNullOrWhiteSpace( bone.ParentName )
+				&& _boneDepths.TryGetValue( bone.ParentName, out var parentDepth )
+					? parentDepth + 1
+					: 0;
+			_boneDepths[bone.Name] = depth;
+			if ( depth > _maxBoneDepth
+				&& SkeletonBoneStyle.Classify( bone ) == SkeletonBoneKind.Arm )
+				_maxBoneDepth = depth;
+		}
+	}
+
 	private void DrawHostSkeletonPass(
 		EvaluatedPose pose,
 		float alpha,
 		bool useRenderedArms )
 	{
+		var showIk = _controller.Document.Workspace.ShowIkBones;
 		foreach ( var bone in _hostSkeleton!.Bones )
 		{
 			if ( !TryGetDisplayedBoneTransform(
@@ -1536,7 +1653,18 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				useRenderedArms,
 				out var transform ) )
 				continue;
-			var color = bone.IsWeaponBone ? WeaponAnimatorTheme.Amber : WeaponAnimatorTheme.Cyan;
+
+			var boneStyle = SkeletonBoneStyle.Resolve(
+				SkeletonBoneStyle.Classify( bone ),
+				_boneDepths.GetValueOrDefault( bone.Name ),
+				_maxBoneDepth,
+				showIk );
+			// Skipping also drops the hitbox below, so hidden bones stop stealing clicks.
+			if ( !boneStyle.Visible )
+				continue;
+
+			var color = boneStyle.Color;
+			var boneAlpha = alpha * boneStyle.AlphaScale;
 			if ( !string.IsNullOrWhiteSpace( bone.ParentName )
 				&& _hostSkeleton.ByName.TryGetValue( bone.ParentName, out var parentBone )
 				&& TryGetDisplayedBoneTransform(
@@ -1545,15 +1673,19 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 					useRenderedArms,
 					out var parent ) )
 			{
-				Gizmo.Draw.Color = color.WithAlpha( 0.45f * alpha );
+				Gizmo.Draw.Color = color.WithAlpha( 0.45f * boneAlpha );
 				Gizmo.Draw.Line( parent.Position, transform.Position );
 			}
 
 			using var scope = Gizmo.Scope( $"host_bone:{bone.Name}", transform );
 			var selected = bone.Name == _controller.Document.Workspace.SelectedBone;
-			var radius = Math.Clamp( transform.Position.Distance( _camera.WorldPosition ) / 180.0f, 0.08f, 0.45f );
-			Gizmo.Draw.Color = (selected ? Color.White : color).WithAlpha( alpha );
-			Gizmo.Draw.SolidSphere( 0, selected ? radius * 0.7f : radius * 0.3f, 5, 4 );
+			var radius = Math.Clamp( transform.Position.Distance( _camera.WorldPosition ) / 180.0f, 0.08f, 0.45f )
+				* boneStyle.RadiusScale;
+			Gizmo.Draw.Color = (selected ? Color.White : color).WithAlpha( boneAlpha );
+			if ( boneStyle.Hollow )
+				Gizmo.Draw.LineSphere( 0, selected ? radius * 0.7f : radius * 0.45f, 3 );
+			else
+				Gizmo.Draw.SolidSphere( 0, selected ? radius * 0.7f : radius * 0.3f, 5, 4 );
 			Gizmo.Hitbox.Sphere( new Sphere( 0, radius ) );
 			if ( Gizmo.IsHovered && Gizmo.WasLeftMousePressed )
 				_controller.SelectBone( bone.Name );
@@ -1609,6 +1741,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 			DrawTether(
 				_controller.Document.Binding.PrimaryHand,
 				pose,
+				pose.PrimaryHandGoal,
 				_controller.Document.Binding.PrimaryHand.Reachable,
 				"hand_R" );
 		}
@@ -1619,6 +1752,7 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 				DrawTether(
 					_controller.Document.Binding.SupportHand,
 					pose,
+					pose.SupportHandGoal,
 					_controller.Document.Binding.SupportHand.Reachable,
 					"hand_L" );
 			}
@@ -1628,20 +1762,35 @@ public sealed class WeaponAnimatorViewport : SceneRenderingWidget
 	private static void DrawTether(
 		RigTarget target,
 		EvaluatedPose pose,
+		Transform? solvedGoal,
 		bool reachable,
 		string handBone )
 	{
 		if ( !pose.Model.TryGetValue( handBone, out var hand ) )
 			return;
-		var targetTransform = target.Transform;
-		if ( !string.IsNullOrWhiteSpace( target.AttachedBone )
-			&& pose.Model.TryGetValue( target.AttachedBone, out var attached ) )
+
+		// Draw the goal the IK actually solved toward. The raw binding transform is the bind-time
+		// value, so it drifts away from the hand as soon as a clip animates the control - which made
+		// the tether read as "far out of reach" while the hand sat correctly on the weapon.
+		Transform targetTransform;
+		if ( solvedGoal is { } goal )
 		{
-			targetTransform = new Transform(
-				attached.PointToWorld( target.Transform.Position ),
-				attached.Rotation * target.Transform.Rotation );
+			targetTransform = goal;
+		}
+		else
+		{
+			targetTransform = target.Transform;
+			if ( !string.IsNullOrWhiteSpace( target.AttachedBone )
+				&& pose.Model.TryGetValue( target.AttachedBone, out var attached ) )
+			{
+				targetTransform = new Transform(
+					attached.PointToWorld( target.Transform.Position ),
+					attached.Rotation * target.Transform.Rotation );
+			}
 		}
 
+		// Scoped so the colour and thickness do not leak into whatever draws next.
+		using var scope = Gizmo.Scope( "grip_tether" );
 		Gizmo.Draw.Color = reachable ? WeaponAnimatorTheme.Green : WeaponAnimatorTheme.Coral;
 		Gizmo.Draw.LineThickness = 2.5f;
 		Gizmo.Draw.Line( hand.Position, targetTransform.Position );
