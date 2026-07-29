@@ -5,7 +5,8 @@ A native S&box editor tool for preparing rigged weapon models, posing Facepunch 
 > [!IMPORTANT]
 > This project is currently in **beta**. Core authoring is usable, but bugs and workflow changes should be expected. Keep your project under version control and report anything that behaves unexpectedly.
 
-<img width="2560" height="1353" alt="image" src="https://github.com/user-attachments/assets/4a135ad2-c567-46b6-a048-52b2353422d8" />
+<img width="2294" height="1298" alt="image" src="https://github.com/user-attachments/assets/8a397125-4e1f-4c2e-bdd5-2de109ecc029" />
+
 
 
 ## Features
